@@ -107,18 +107,24 @@ cat > /usr/local/bin/dsh-start.sh << 'WRAPPER'
 set -euo pipefail
 
 DSH_BIN="$(command -v dsh)"
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 HOSTN="$(hostname -f 2>/dev/null || hostname)"
 
 ARGS=(web --no-open
       --host 127.0.0.1
       --port "${DSH_PORT:-3080}")
 
-# Autoritäten, unter denen das Web UI den Browser akzeptiert
-[[ -n "${IP}" ]] && ARGS+=(--trusted-host "${IP}:${PUBLIC_PORT:-8080}")
-ARGS+=("--trusted-host" "localhost:${PUBLIC_PORT:-8080}")
-ARGS+=("--trusted-host" "127.0.0.1:${PUBLIC_PORT:-8080}")
-ARGS+=("--trusted-host" "${HOSTN}:${PUBLIC_PORT:-8080}")
+# Autoritäten für den browser-trust fence von dsh. WICHTIG: bewusst OHNE Port
+# angeben – ein port-loser Eintrag matcht den Hostnamen auf jedem Port (die von
+# dsh selbst für LAN-IP-Zugriff vorgesehene Form), und der Fence vergleicht die
+# Origin des Browsers gegen den vollen Host:-Header inkl. Port.
+# Nur IPv4-Literale aufnehmen (IPv6 mit ':' würde den WHATWG-Parse-Check von
+# dsh beim Boot hart scheitern lassen).
+for addr in $(hostname -I 2>/dev/null); do
+  [[ "${addr}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && ARGS+=(--trusted-host "${addr}")
+done
+ARGS+=("--trusted-host" "localhost")
+ARGS+=("--trusted-host" "127.0.0.1")
+ARGS+=("--trusted-host" "${HOSTN}")
 
 exec "${DSH_BIN}" "${ARGS[@]}"
 WRAPPER
@@ -148,7 +154,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_read_timeout 86400s;
