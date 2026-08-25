@@ -1,0 +1,30 @@
+# ============================================================================
+#  DeepSeek Harness (dsh) – systemd-Unit
+#  Referenz-Kopie mit Standardwerten. Die Installation schreibt eine
+#  instanzspezifische Version nach /etc/systemd/system/dsh.service
+#  (identischer Aufbau, Ports aus den Installer-Variablen).
+#
+#  Reboot-sicher: enable + Restart=always + After=network-online.target
+# ============================================================================
+
+[Unit]
+Description=DeepSeek Harness Web UI (dsh)
+Documentation=https://github.com/deepseek-ai/deepseek-harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/opt/dsh
+Environment=DSH_HOME=/var/lib/dsh
+Environment=DSH_PORT=3080
+Environment=PUBLIC_PORT=8080
+ExecStart=/usr/local/bin/dsh-start.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
