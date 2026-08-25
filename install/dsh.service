@@ -21,6 +21,8 @@ WorkingDirectory=/opt/dsh
 Environment=DSH_HOME=/var/lib/dsh
 Environment=DSH_PORT=3080
 Environment=PUBLIC_PORT=8080
+# '+' = mit Root-Rechten (schreibt /etc/nginx/conf.d/dsh-origin.conf)
+ExecStartPre=+/usr/local/bin/dsh-render-origin-map.sh
 ExecStart=/usr/local/bin/dsh-start.sh
 Restart=always
 RestartSec=5

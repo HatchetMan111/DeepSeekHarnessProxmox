@@ -104,6 +104,7 @@ Erwartung nach Neustart: beide Services `active`, HTTP 200, Web UI erreichbar.
 | Installer bricht ab | Komplette Fehlerkette wird ausgegeben (Exit-Code, Zeile, Befehl, Log-Tail); Host-Log: `/tmp/dsh-install-*.log` |
 | `crypto.randomUUID is not a function` (z. B. „Could not load agent presets") | Behoben durch den Installer: nginx injiziert ein Polyfill in die Web-UI-HTML (die API existiert im Browser nur unter HTTPS/localhost). Prüfen: `curl -s http://localhost:8080 \| grep -c randomUUID` → muss ≥ 1 sein; danach Browser-Cache leeren (Strg+Umschalt+R) |
 | `HTTP 403` bei API-Calls (z. B. „transport failure for /api/...: HTTP 403") | Behoben durch den Installer: nginx reicht den vollen `Host`-Header durch (`$http_host`) und der Start-Wrapper trägt alle IPv4-Adressen **port-los** als `--trusted-host` ein (dsh-Fence verlangt sonst exakte `host:port`-Matches). Prüfen: `pct exec <CTID> -- ps auxw \| grep 'dsh web'` zeigt die Flags; nach Installer-Rerun Browser-Cache leeren |
+| „settings are unavailable in this browser" / Models-Auswahl lädt nicht | Behoben durch den Installer: dsh pinnt die Konfigurations-Ebene (Settings/Credentials/Presets/Workspace-Wahl) hart auf Loopback – der `/api/`-Proxy-Block stellt Requests deshalb aus Sicht von dsh lokal dar. Prüfen: `curl -s -o /dev/null -w '%{http_code}' -X POST -H "Host: $(hostname -I\|awk '{print $1}'):8080" -H "Origin: http://$(hostname -I\|awk '{print $1}'):8080" http://localhost:8080/api/settings.describe` → muss `200` sein |
 | Service down | `pct exec <CTID> -- journalctl -u dsh -e` |
 | Proxy-Fehler | `pct exec <CTID> -- tail -n50 /var/log/nginx/error.log` |
 | Alles verfolgen | Einzeiler mit Debug-Ausgabe: `bash -x <(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)` |
@@ -133,6 +134,27 @@ UI lädt, aber API-Calls scheitern, ergänze die Autorität in `/usr/local/bin/d
 
 <!-- Platzhalter -->
 ![Web UI](docs/screenshot-webui.png)
+
+## Sicherheit / Netzwerkfreigabe
+
+dsh ist als *lokale* Einzelbenutzer-App konzipiert: die Konfigurations-Ebene
+(Settings, Credentials, Presets, Workspace-Wahl) darf nur vom selben Rechner
+(Loopback) kommen – als Schutz gegen DNS-Rebinding/Cross-Site-Angriffe aus dem
+Browser, **nicht** als Authentifizierung. Da der Container per Definition remote
+genutzt wird, stellt der Installer diese Ebene über den `/api/`-Proxy-Block
+bereit. Der Schutz wird dabei nicht einfach abgeschaltet, sondern in nginx
+verlagert: Nur Anfragen mit `Origin` dieser Maschine (Container-IP, localhost,
+Hostname – siehe `/etc/nginx/conf.d/dsh-origin.conf`, wird bei jedem
+Service-Start neu gerendert) werden akzeptiert; alles andere → 403.
+
+Konsequenzen:
+
+- **Vertrauenswürdiges Heim-LAN voraussetzen**: Wer im LAN ist, kann ohnehin
+  den Agent steuern (Kommandos ausführen); die Settings-Ebene ändert daran
+  nichts Grundsätzliches – aber es gibt kein Login/Passwort für die Web UI.
+- Fremde Netze/Gast-WLANs: Container nicht freigeben (PVE-Firewall oder UFW).
+- Zur Rücksetzung des Upstream-Standarts: `location /api/ { … }`-Block in
+  `/etc/nginx/sites-available/dsh.conf` entfernen und `nginx -s reload`.
 
 ## Lizenz
 

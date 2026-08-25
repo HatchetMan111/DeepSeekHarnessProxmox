@@ -133,6 +133,42 @@ msg_ok "Wrapper erstellt"
 
 # ───────────────────────── 6. Reverse Proxy (nginx) ─────────────────────────
 # Notwendig, weil 'dsh web' absichtlich kein --host 0.0.0.0 unterstützt.
+
+# 6a. Origin-Allowliste (Schutz gegen DNS-Rebinding/Cross-Site): dsh pinnt die
+#     Konfigurations-Ebene (Settings/Credentials/Presets/Workspace-Wahl) hart
+#     auf Loopback-Same-Origin. Der /api/-Proxy-Block unten stellt Requests
+#     deshalb aus Sicht von dsh als lokal dar – der eigentliche Schutz passiert
+#     HIER in nginx: nur Origins dieser Maschine werden akzeptiert.
+#     Das Mapping wird bei jedem Service-Start neu gerendert (IP-Wechsel).
+msg_info "Origin-Renderer wird erstellt (/usr/local/bin/dsh-render-origin-map.sh)"
+cat > /usr/local/bin/dsh-render-origin-map.sh << 'RENDER'
+#!/usr/bin/env bash
+set -euo pipefail
+OUT="/etc/nginx/conf.d/dsh-origin.conf"
+HOSTN="$(hostname -f 2>/dev/null || hostname)"
+HOSTN_RX="$(printf '%s' "${HOSTN}" | sed 's/[^a-zA-Z0-9.-]/./g')"
+{
+  echo "# Automatisch erzeugt – nicht manuell editieren (wird bei jedem Start neu geschrieben)."
+  echo 'map $http_origin $dsh_origin_ok {'
+  echo '    default 0;'
+  echo '    ""      1;'
+  echo '    "~^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$" 1;'
+  for addr in $(hostname -I 2>/dev/null); do
+    if [[ "${addr}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+      printf '    "~^https?://%s.%s.%s.%s(:[0-9]+)?$" 1;\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+    fi
+  done
+  printf '    "~^https?://%s(:[0-9]+)?$" 1;\n' "${HOSTN_RX}"
+  echo '}'
+} > "${OUT}"
+nginx -t -q
+systemctl try-reload-or-restart nginx >/dev/null 2>&1 || true
+RENDER
+chmod 755 /usr/local/bin/dsh-render-origin-map.sh
+PUBLIC_PORT="$PUBLIC_PORT" DSH_PORT="$DSH_PORT" /usr/local/bin/dsh-render-origin-map.sh
+msg_ok "Origin-Allowliste gerendert (/etc/nginx/conf.d/dsh-origin.conf)"
+
+# 6b. Server-Block
 msg_info "nginx als Reverse Proxy (0.0.0.0:${PUBLIC_PORT} → 127.0.0.1:${DSH_PORT})"
 cat > /etc/nginx/sites-available/dsh.conf << 'NGINX'
 server {
@@ -140,6 +176,28 @@ server {
     listen [::]:__PUBLIC_PORT__;
     server_name _;
     client_max_body_size 64m;
+
+    # Privilegierte API-Ebene: dsh erlaubt Settings/Credentials/Presets nur
+    # aus Loopback-Same-Origin ("configuration plane"). Der Proxy trägt die
+    # Anfrage daher als Loopback an dsh heran; der echte Schutz ist der
+    # Origin-Filter ($dsh_origin_ok) oben aus dsh-origin.conf.
+    location /api/ {
+        if ($dsh_origin_ok = 0) { return 403; }
+        proxy_pass http://127.0.0.1:__DSH_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:__DSH_PORT__;
+        proxy_set_header Origin "";
+        proxy_set_header Sec-Fetch-Site "";
+        proxy_set_header Sec-Fetch-Mode "";
+        proxy_set_header Sec-Fetch-Dest "";
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+        client_max_body_size 320m;
+    }
 
     location / {
         # dsh ruft crypto.randomUUID() im Browser auf – diese API existiert nur
@@ -186,6 +244,9 @@ WorkingDirectory=${DSH_WORKDIR}
 Environment=DSH_HOME=${DSH_HOME}
 Environment=DSH_PORT=${DSH_PORT}
 Environment=PUBLIC_PORT=${PUBLIC_PORT}
+# '+'-Präfix: Renderer braucht Root-Rechte für /etc/nginx (User=dsh gilt sonst
+# auch für ExecStartPre) und schreibt nur die deterministische Origin-Map.
+ExecStartPre=+/usr/local/bin/dsh-render-origin-map.sh
 ExecStart=/usr/local/bin/dsh-start.sh
 Restart=always
 RestartSec=5
@@ -226,11 +287,33 @@ else
   msg_fatal "Polyfill fehlt in der HTML-Antwort – nginx sub_filter prüfen."
 fi
 
+# Privilegierte API-Ebene: Loopback-Masquerade muss greifen (kein 403),
+# fremde Origins müssen weiter geblockt bleiben (403 durch unseren Fence).
+CT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PRIV_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Host: ${CT_IP}:${PUBLIC_PORT}" \
+  -H "Origin: http://${CT_IP}:${PUBLIC_PORT}" \
+  -H "Sec-Fetch-Site: same-origin" \
+  "http://127.0.0.1:${PUBLIC_PORT}/api/settings.describe" || true)
+if [[ "$PRIV_CODE" == "403" ]]; then
+  journalctl -u nginx -n 20 --no-pager || true
+  msg_fatal "Privilegierte API liefert 403 – Loopback-Masquerade/Origin-Map prüfen."
+fi
+msg_ok "Privilegierte API erreichbar (settings.describe → HTTP ${PRIV_CODE}, erwartet ≠ 403)"
+
+EVIL_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Host: ${CT_IP}:${PUBLIC_PORT}" \
+  -H "Origin: http://boeser-server.example" \
+  "http://127.0.0.1:${PUBLIC_PORT}/api/settings.describe" || true)
+if [[ "$EVIL_CODE" != "403" ]]; then
+  msg_fatal "Fremder Origin wurde NICHT blockiert (HTTP ${EVIL_CODE}) – Origin-Filter prüfen!"
+fi
+msg_ok "Fremder Origin korrekt blockiert (HTTP 403)"
+
 LISTEN_OK=$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":(${PUBLIC_PORT}|${DSH_PORT})$" | sort -u || true)
 msg_ok "Lauschende Sockets: ${LISTEN_OK//$'\n'/ · }"
 
 # ──────────────────────────── Abschlussbox ──────────────────────────────────
-CT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo -e "${GN} ${APP_NAME} ist bereit!${CL}"
