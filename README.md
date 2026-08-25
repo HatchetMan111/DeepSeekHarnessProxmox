@@ -31,6 +31,7 @@ CTID=150 CORES=4 MEM_MB=4096 DISK_GB=16 \
 | Variable        | Standard   | Bedeutung                                        |
 |-----------------|------------|--------------------------------------------------|
 | `CTID`          | nächste freie | Proxmox-Container-ID                          |
+| `HOST_NAME`     | `DeepSeekHarness` | Hostname des Containers                   |
 | `CORES`         | `2`        | vCPUs                                            |
 | `MEM_MB`        | `2048`     | RAM in MB                                        |
 | `SWAP_MB`       | `512`      | Swap                                             |
@@ -43,7 +44,8 @@ CTID=150 CORES=4 MEM_MB=4096 DISK_GB=16 \
 
 ### Was das Script macht
 
-1. Legt einen **unprivilegierten Debian-12-LXC** an (`nesting=1` für die bwrap-Sandbox von dsh,
+1. Legt einen **unprivilegierten Debian-12-LXC** an (Hostname standardmäßig `DeepSeekHarness`,
+   `nesting=1` für die bwrap-Sandbox von dsh,
    `onboot=1`, DHCP an `vmbr0`) – existiert die CT-ID schon, wird stattdessen **aktualisiert**
 2. Installiert im CT: nginx, bubblewrap, **Node.js 22 LTS** und das npm-Paket `@deepseek-ai/dsh`
 3. Startet `dsh web --no-open` als Service-Benutzer `dsh` **nur auf 127.0.0.1:3080**
@@ -100,9 +102,26 @@ Erwartung nach Neustart: beide Services `active`, HTTP 200, Web UI erreichbar.
 | Symptom | Wo schauen |
 |---|---|
 | Installer bricht ab | Komplette Fehlerkette wird ausgegeben (Exit-Code, Zeile, Befehl, Log-Tail); Host-Log: `/tmp/dsh-install-*.log` |
+| `crypto.randomUUID is not a function` (z. B. „Could not load agent presets") | Behoben durch den Installer: nginx injiziert ein Polyfill in die Web-UI-HTML (die API existiert im Browser nur unter HTTPS/localhost). Prüfen: `curl -s http://localhost:8080 \| grep -c randomUUID` → muss ≥ 1 sein; danach Browser-Cache leeren (Strg+Umschalt+R) |
 | Service down | `pct exec <CTID> -- journalctl -u dsh -e` |
 | Proxy-Fehler | `pct exec <CTID> -- tail -n50 /var/log/nginx/error.log` |
 | Alles verfolgen | Einzeiler mit Debug-Ausgabe: `bash -x <(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)` |
+
+Sauberere Alternative zum Polyfill (echter Secure Context): selbstsigniertes HTTPS aktivieren –
+
+```bash
+pct exec <CTID> -- bash -c "openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+  -keyout /etc/nginx/ssl-dsh.key -out /etc/nginx/ssl-dsh.crt \
+  -subj '/CN=DeepSeekHarness' && sed -i 's/listen 0.0.0.0:8080;/listen 0.0.0.0:8080 ssl;/; s/listen \[::\]:8080;/listen [::]:8080 ssl;/; s|proxy_pass http://127.0.0.1:3080;|ssl_certificate /etc/nginx/ssl-dsh.crt; ssl_certificate_key /etc/nginx/ssl-dsh.key;\n  proxy_pass http://127.0.0.1:3080;|' /etc/nginx/sites-available/dsh.conf && nginx -t && systemctl restart nginx"
+# dann https://<CT-IP>:8080 (Browser-Warnung wegen selbstsigniertem Zertifikat bestätigen)
+```
+
+Container umbenennen (nur bei bereits bestehenden Installationen nötig – Neuinstallationen
+heißen automatisch `DeepSeekHarness`):
+
+```bash
+pct set <CTID> --hostname DeepSeekHarness && pct reboot <CTID>
+```
 
 Hinweis zur Erreichbarkeit: `dsh web` lauscht absichtlich nur auf `127.0.0.1`; deshalb läuft vor
 ihm ein nginx. Greifst du über eine neue Adresse (z. B. geänderte CT-IP oder DNS-Name) zu und die

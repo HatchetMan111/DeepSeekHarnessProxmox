@@ -26,6 +26,7 @@ APP="dsh"
 APP_NAME="DeepSeek Harness"
 
 CTID="${CTID:-}"                    # leer → automatisch die nächste freie ID
+HOST_NAME="${HOST_NAME:-DeepSeekHarness}"   # Hostname des Containers
 STORAGE="${STORAGE:-auto}"          # "auto" → erste aktive Storage mit rootdir
 VZTMP_STORAGE="${VZTMP_STORAGE:-local}"   # Storage für das Debian-Template
 NET_BRIDGE="${NET_BRIDGE:-vmbr0}"
@@ -115,7 +116,7 @@ if [[ "$UPDATE_MODE" -eq 0 ]]; then
   ROOT_PW="$(openssl rand -base64 15)"
   msg_info "LXC-Container ${CTID} wird erstellt (${CORES} vCPU / ${MEM_MB} MB RAM / ${DISK_GB} GB)"
   pct create "$CTID" "${VZTMP_STORAGE}:vztmpl/${TEMPLATE}" \
-    --hostname "${APP}-${CTID}" \
+    --hostname "$HOST_NAME" \
     --cores "$CORES" \
     --memory "$MEM_MB" \
     --swap "$SWAP_MB" \

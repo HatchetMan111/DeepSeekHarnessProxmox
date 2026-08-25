@@ -136,6 +136,14 @@ server {
     client_max_body_size 64m;
 
     location / {
+        # dsh ruft crypto.randomUUID() im Browser auf – diese API existiert nur
+        # in Secure Contexts (HTTPS/localhost). Beim Zugriff ueber
+        # http://<CT-IP> fehlt sie, deshalb wird ein Polyfill vor allen
+        # App-Scripts in den <head> jeder HTML-Antwort injiziert.
+        proxy_set_header Accept-Encoding "";
+        sub_filter '</head>' '<script>(function(){if(typeof crypto==="object"&&crypto&&typeof crypto.randomUUID!=="function"){var f=function(){var b=new Uint8Array(16),i,j,h=[];if(typeof crypto.getRandomValues==="function"){crypto.getRandomValues(b);}else{for(i=0;i<16;i++){b[i]=Math.floor(Math.random()*256);}}b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;for(j=0;j<16;j++){h.push((b[j]+256).toString(16).slice(1));}return h.slice(0,4).join("")+"-"+h.slice(4,6).join("")+"-"+h.slice(6,8).join("")+"-"+h.slice(8,10).join("")+"-"+h.slice(10,16).join("");};try{Object.defineProperty(crypto,"randomUUID",{value:f,configurable:true});}catch(e){crypto.randomUUID=f;}}})();</script></head>';
+        sub_filter_once on;
+
         proxy_pass http://127.0.0.1:__DSH_PORT__;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -205,6 +213,12 @@ if [[ "$HTTP_OK" -ne 1 ]]; then
   msg_fatal "Web UI antwortet nicht auf Port ${PUBLIC_PORT} – Logs siehe oben."
 fi
 msg_ok "Web UI antwortet auf http://localhost:${PUBLIC_PORT}"
+
+if curl -fsS "http://127.0.0.1:${PUBLIC_PORT}" | grep -q "randomUUID"; then
+  msg_ok "randomUUID-Polyfill wird ausgeliefert (Fix für http-Zugriff ohne HTTPS)"
+else
+  msg_fatal "Polyfill fehlt in der HTML-Antwort – nginx sub_filter prüfen."
+fi
 
 LISTEN_OK=$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":(${PUBLIC_PORT}|${DSH_PORT})$" | sort -u || true)
 msg_ok "Lauschende Sockets: ${LISTEN_OK//$'\n'/ · }"
