@@ -44,6 +44,11 @@ DSH_PORT="${DSH_PORT:-3080}"        # interner dsh-Port (nur 127.0.0.1)
 INNER_FILE="dsh-inner.sh"
 HOST_LOG="/tmp/${APP}-install-$(date +%Y%m%d-%H%M%S).log"
 
+# DeepSeek-API-Key: optional per Umgebungsvariable setzen (Automatisierung),
+# sonst wird bei interaktivem Lauf danach gefragt. Leer = überspringen
+# (Key kann jederzeit in der Web UI unter Settings → Models eingetragen werden).
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+
 # ───────────────────────────── Ausgabe-Helfer ───────────────────────────────
 YW='\033[33m'; GN='\033[1;92m'; RD='\033[01;31m'; BL='\033[36m'; CL='\033[m'
 CM="${GN}✔${CL}"; CROSS="${RD}✘${CL}"; INFO="${BL}ℹ${CL}"
@@ -79,6 +84,24 @@ command -v pveam >/dev/null || msg_fatal "'pveam' nicht gefunden – bitte auf e
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo -e "${GN} ${APP_NAME} – LXC Installer (Community-Scripts-Stil)${CL}"
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+
+# ─────────────────── Optional: DeepSeek-API-Key beschaffen ──────────────────
+if [[ -z "$DEEPSEEK_API_KEY" && -t 0 ]]; then
+  echo ""
+  echo -e " ${YW}Optional: DeepSeek-API-Key hinterlegen${CL}"
+  echo -e " Der Key wird nur lokal im Container gespeichert (${YW}/var/lib/dsh/.credentials.yaml${CL}, Modus 600)."
+  echo -e " Überspringen mit Enter – konfigurierbar jederzeit in der Web UI (Settings → Models)."
+  read -rs -p " API-Key [Enter = überspringen]: " DEEPSEEK_API_KEY
+  echo ""
+fi
+if [[ -n "$DEEPSEEK_API_KEY" ]]; then
+  if [[ ! "$DEEPSEEK_API_KEY" =~ ^[A-Za-z0-9_.-]{20,}$ ]]; then
+    msg_fatal "API-Key hat unerwartetes Format (mind. 20 Zeichen aus [A-Za-z0-9_.-] erwartet)."
+  fi
+  KEY_FILE_HOST="/tmp/.dsh-apikey.$$"
+  printf '%s' "$DEEPSEEK_API_KEY" > "$KEY_FILE_HOST"
+  chmod 600 "$KEY_FILE_HOST"
+fi
 
 # ───────────────────────────── 2. CT-ID wählen ──────────────────────────────
 if [[ -z "$CTID" ]]; then
@@ -155,12 +178,26 @@ pct exec "$CTID" -- bash -c \
 msg_info "Lade Installations-Script: ${RAW_BASE}/install/${INNER_FILE}"
 pct exec "$CTID" -- wget -qO "/tmp/${INNER_FILE}" "${RAW_BASE}/install/${INNER_FILE}"
 
+# API-Key (falls gesetzt) ohne Prozesslisten-Exposition in den CT pushen
+KEY_FILE_CT=""
+if [[ -n "${DEEPSEEK_API_KEY:-}" && -f "${KEY_FILE_HOST:-}" ]]; then
+  KEY_FILE_CT="/tmp/.dsh-apikey"
+  pct push "$CTID" "$KEY_FILE_HOST" "$KEY_FILE_CT" >/dev/null
+  pct exec "$CTID" -- chmod 600 "$KEY_FILE_CT"
+  rm -f "$KEY_FILE_HOST"
+fi
+
 # ──────────────── 6. Installation im Container ausführen ────────────────────
 # Vollständige Ausgabe (stdout+stderr) parallel ins Host-Log schreiben;
 # pipefail stellt sicher, dass ein Fehler des Inner-Scripts hier ankommt.
 set -o pipefail
 msg_info "Installiere ${APP_NAME} im Container (Log: ${HOST_LOG})"
-pct exec "$CTID" -- bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" 2>&1 | tee "$HOST_LOG"
+if [[ -n "$KEY_FILE_CT" ]]; then
+  pct exec "$CTID" -- bash -c \
+    "API_KEY=\$(cat '$KEY_FILE_CT'); rm -f '$KEY_FILE_CT'; bash '/tmp/${INNER_FILE}' '${PUBLIC_PORT}' '${DSH_PORT}' \"\$API_KEY\"" 2>&1 | tee "$HOST_LOG"
+else
+  pct exec "$CTID" -- bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" "" 2>&1 | tee "$HOST_LOG"
+fi
 
 # ──────────────────────────── 7. Abschlussbox ───────────────────────────────
 CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
@@ -177,7 +214,11 @@ if [[ "$UPDATE_MODE" -eq 0 ]]; then
   echo -e " ${YW}Login-Daten:${CL} /root/${APP}-ct${CTID}.credentials"
 fi
 echo -e ""
-echo -e " Erster Start: im Web UI unter ${YW}Settings → Models${CL} einen"
-echo -e " DeepSeek-API-Key hinterlegen (lokal gespeichert, kein Cloud-Zwang)."
+if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+  echo -e " ${YW}API-Key:${CL}     hinterlegt (Settings → Models zeigt ihn als konfiguriert)"
+else
+  echo -e " ${YW}Nächster Schritt:${CL} Web UI öffnen → Settings → Models → DeepSeek-API-Key"
+fi
+echo -e " Erste Session: Workspace wählen (z. B. /opt/dsh), dann loslegen."
 echo -e " Update = Einzeiler einfach erneut ausführen (idempotent)."
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"

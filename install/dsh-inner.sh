@@ -13,6 +13,7 @@ set -Eeuo pipefail
 
 PUBLIC_PORT="${1:-8080}"   # extern, gebunden an 0.0.0.0 durch nginx
 DSH_PORT="${2:-3080}"      # intern, nur auf 127.0.0.1 (dsh unterstützt kein 0.0.0.0)
+API_KEY="${3:-}"           # DeepSeek-API-Key (optional; leer → nur Web-UI-Konfiguration)
 
 APP="dsh"
 APP_NAME="DeepSeek Harness"
@@ -97,6 +98,28 @@ npm install -g @deepseek-ai/dsh --silent
 command -v dsh >/dev/null || msg_fatal "'dsh' nach npm-Installation nicht im PATH."
 msg_ok "dsh $(dsh --version 2>/dev/null || echo '?') installiert ($(command -v dsh))"
 
+# ───────────────── 4b. API-Key vorab hinterlegen (optional) ─────────────────
+# Format exakt nach dsh-credentials-local: version: 1 + refs-Mapping.
+# Damit funktioniert Settings → Models ohne manuelle Eingabe in der Web UI.
+if [[ -n "${API_KEY}" ]]; then
+  if [[ ! "${API_KEY}" =~ ^[A-Za-z0-9_.-]{20,}$ ]]; then
+    msg_fatal "API-Key hat unerwartetes Format (erwartet: mind. 20 Zeichen aus [A-Za-z0-9_.-]). Abbruch, nichts verstümmelt."
+  fi
+  CRED_FILE="${DSH_HOME}/.credentials.yaml"
+  if [[ ! -f "${CRED_FILE}" ]]; then
+    printf 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: %s\n' "${API_KEY}" > "${CRED_FILE}"
+  elif grep -q '^  DEEPSEEK_API_KEY:' "${CRED_FILE}"; then
+    sed -i "s|^  DEEPSEEK_API_KEY: .*|  DEEPSEEK_API_KEY: ${API_KEY}|" "${CRED_FILE}"
+  elif grep -q '^refs:' "${CRED_FILE}"; then
+    sed -i "/^refs:/a\\  DEEPSEEK_API_KEY: ${API_KEY}" "${CRED_FILE}"
+  else
+    msg_fatal "${CRED_FILE} existiert in unbekanntem Format – bitte manuell prüfen."
+  fi
+  chown "${DSH_USER}:${DSH_USER}" "${CRED_FILE}"
+  chmod 600 "${CRED_FILE}"
+  msg_ok "DeepSeek-API-Key hinterlegt (${CRED_FILE}, Modus 600)"
+fi
+
 # ───────────────────── 5. Start-Wrapper (trusted hosts) ─────────────────────
 # dsh bindet bewusst nur auf 127.0.0.1 und prüft /api-Aufrufe gegen eine
 # Trust-Liste ('browser-trust fence'). Der Wrapper trägt die aktuelle
@@ -152,13 +175,13 @@ HOSTN_RX="$(printf '%s' "${HOSTN}" | sed 's/[^a-zA-Z0-9.-]/./g')"
   echo 'map $http_origin $dsh_origin_ok {'
   echo '    default 0;'
   echo '    ""      1;'
-  echo '    "~^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$" 1;'
+  echo '    "~*^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$" 1;'
   for addr in $(hostname -I 2>/dev/null); do
     if [[ "${addr}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-      printf '    "~^https?://%s.%s.%s.%s(:[0-9]+)?$" 1;\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+      printf '    "~*^https?://%s.%s.%s.%s(:[0-9]+)?$" 1;\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
     fi
   done
-  printf '    "~^https?://%s(:[0-9]+)?$" 1;\n' "${HOSTN_RX}"
+  printf '    "~*^https?://%s(:[0-9]+)?$" 1;\n' "${HOSTN_RX}"
   echo '}'
 } > "${OUT}"
 nginx -t -q
@@ -310,6 +333,22 @@ if [[ "$EVIL_CODE" != "403" ]]; then
 fi
 msg_ok "Fremder Origin korrekt blockiert (HTTP 403)"
 
+# API-Key-Nachweis über den echten RPC-Weg (gleicher Call wie im Web UI):
+if [[ -n "${API_KEY}" ]]; then
+  CRED_STATE=$(curl -sS -X POST \
+    -H "Host: ${CT_IP}:${PUBLIC_PORT}" \
+    -H "Origin: http://${CT_IP}:${PUBLIC_PORT}" \
+    -H "Content-Type: application/json" \
+    -d '{"type":"client-request","rpcId":"installer","method":"credentials.describe","payload":{"refs":["DEEPSEEK_API_KEY"]}}' \
+    "http://127.0.0.1:${PUBLIC_PORT}/api/credentials.describe" || true)
+  if grep -q '"configured":true' <<< "$CRED_STATE"; then
+    msg_ok "DEEPSEEK_API_KEY ist aktiv (credentials.describe → configured:true, source:file)"
+  else
+    journalctl -u "$APP" -n 20 --no-pager || true
+    msg_fatal "API-Key nicht erkannt – .credentials.yaml/Service-Logs prüfen."
+  fi
+fi
+
 LISTEN_OK=$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":(${PUBLIC_PORT}|${DSH_PORT})$" | sort -u || true)
 msg_ok "Lauschende Sockets: ${LISTEN_OK//$'\n'/ · }"
 
@@ -319,6 +358,10 @@ echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GN} ${APP_NAME} ist bereit!${CL}"
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo -e " ${YW}URL:${CL}         http://${CT_IP:-<CT-IP>}:${PUBLIC_PORT}"
-echo -e " ${YW}Nächster Schritt:${CL} Settings → Models → DeepSeek-API-Key"
+if [[ -n "${API_KEY}" ]]; then
+  echo -e " ${YW}API-Key:${CL}     hinterlegt und aktiv – Models-Auswahl sofort nutzbar"
+else
+  echo -e " ${YW}Nächster Schritt:${CL} Settings → Models → DeepSeek-API-Key"
+fi
 echo -e " ${YW}Logs:${CL}        journalctl -u ${APP} -e · /var/log/nginx/"
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"

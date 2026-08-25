@@ -42,6 +42,22 @@ CTID=150 CORES=4 MEM_MB=4096 DISK_GB=16 \
 | `PUBLIC_PORT`   | `8080`     | Externer Port der Web UI                         |
 | `DSH_PORT`      | `3080`     | Interner dsh-Port (nur localhost)                |
 
+### API-Key direkt bei der Installation
+
+Der Installer fragt bei interaktivem Lauf **optional nach dem DeepSeek-API-Key** und
+hinterlegt ihn direkt im Container (`/var/lib/dsh/.credentials.yaml`, Modus 600) –
+die Web UI zeigt den Provider dann sofort als konfiguriert, ganz ohne Settings-Eingabe.
+Nur mit Enter bestätigen = überspringen.
+
+Für Automatisierung/Unattended per Umgebungsvariable:
+
+```bash
+DEEPSEEK_API_KEY=sk-... bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)"
+```
+
+Nach der Installation prüft der Installer selbst per RPC
+(`credentials.describe` → `configured: true`), dass der Key aktiv ist.
+
 ### Was das Script macht
 
 1. Legt einen **unprivilegierten Debian-12-LXC** an (Hostname standardmäßig `DeepSeekHarness`,
@@ -60,8 +76,10 @@ Root-Passwort des neuen Containers liegt nach dem ersten Lauf in `/root/dsh-ct<C
 ## Nach der Installation
 
 1. `http://<CT-IP>:8080` öffnen
-2. **Settings → Models**: DeepSeek-API-Key hinterlegen ([platform.deepseek.com](https://platform.deepseek.com)) –
-   wird lokal in `$DSH_HOME/.credentials.yaml` gespeichert; alternativ funktionieren auch eigene
+2. **Workspace wählen** (z. B. `/opt/dsh`) – Session-Composer braucht einen Workspace
+3. API-Key: bei Installer-Eingabe bereits hinterlegt (s. o.); sonst nachträglich unter
+   **Settings → Models** ([platform.deepseek.com](https://platform.deepseek.com)) –
+   wird lokal in `/var/lib/dsh/.credentials.yaml` gespeichert; alternativ funktionieren auch eigene
    OpenAI-kompatible Endpunkte (siehe dsh-Doku)
 3. **Choose workspace**: Arbeitsverzeichnis wählen (Default-Workspace-Root im Container: `/opt/dsh`)
 
