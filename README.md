@@ -103,7 +103,7 @@ Root-Passwort des neuen Containers liegt nach dem ersten Lauf in `/root/dsh-ct<C
 abgelaufenes Cookie) braucht deshalb einen frischen Token-Link:
 
 ```bash
-pct exec <CTID> -- dsh-url
+pct exec <CTID> -- /usr/local/bin/dsh-url
 ```
 
 Der Befehl liest den aktuellen Link aus dem Journal. Der Link ist ein Bearer-Login –
@@ -132,7 +132,7 @@ DHCP-Änderung deshalb einmal neu starten:
 
 ```bash
 pct exec <CTID> -- systemctl restart dsh
-pct exec <CTID> -- dsh-url
+pct exec <CTID> -- /usr/local/bin/dsh-url
 ```
 
 Das alte Cookie gilt für die alte IP; für die neue IP braucht man den neuen Token-Link.
@@ -148,7 +148,7 @@ pct reboot <CTID>
 sleep 30
 pct exec <CTID> -- systemctl is-active dsh nginx       # → active / active
 pct exec <CTID> -- curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8080/  # → 401 (ohne Cookie)
-pct exec <CTID> -- dsh-url                              # → Token-Link für den Browser
+pct exec <CTID> -- /usr/local/bin/dsh-url           # → Token-Link für den Browser
 ```
 
 Erwartung nach Neustart: beide Services `active`, Web UI antwortet (401 ohne Login),
@@ -160,8 +160,10 @@ Token-Link über `dsh-url` abrufbar. Ein bereits eingeloggter Browser funktionie
 
 | Symptom | Wo schauen |
 |---|---|
-| `401 Unauthorized` in der Web UI | Normale URL ohne Login geöffnet. Token-Link nutzen: `pct exec <CTID> -- dsh-url`. Danach ist 30 Tage Cookie-Login. |
-| Neuer Browser / Cookie abgelaufen | `pct exec <CTID> -- dsh-url` – der Token ändert sich bei jedem dsh-Start. |
+| `pct exec ... dsh-url`: `command not found` | `pct exec <CTID> -- /usr/local/bin/dsh-url` nutzen – `pct exec` hat `/usr/local/bin` nicht immer im PATH. |
+| Abschlussbox zeigt keinen Token-Link | Im Host-Log nachsehen: `grep -oE 'https?://[^ ]+\?token=[A-Za-z0-9_-]+' /tmp/dsh-install-*.log \| tail -n1` |
+| `401 Unauthorized` in der Web UI | Normale URL ohne Login geöffnet. Token-Link nutzen: `pct exec <CTID> -- /usr/local/bin/dsh-url`. Danach ist 30 Tage Cookie-Login. |
+| Neuer Browser / Cookie abgelaufen | `pct exec <CTID> -- /usr/local/bin/dsh-url` – der Token ändert sich bei jedem dsh-Start. |
 | Installer bricht ab | Komplette Fehlerkette wird ausgegeben (Exit-Code, Zeile, Befehl, Log-Tail); Host-Log: `/tmp/dsh-install-*.log` |
 | `crypto.randomUUID is not a function` (z. B. „Could not load agent presets") | nginx injiziert ein Polyfill in die Web-UI-HTML (die API existiert im Browser nur unter HTTPS/localhost). Prüfen: `curl -s http://localhost:8080 \| grep -c randomUUID` → muss ≥ 1 sein; danach Browser-Cache leeren (Strg+Umschalt+F5) |
 | `HTTP 403` bei API-Calls | dsh blockiert fremde `Host`/`Origin`-Kombinationen. Zugriff über die CT-IP oder den Hostnamen; nach IP-Wechsel `systemctl restart dsh`. Prüfen: `journalctl -u dsh -e` |

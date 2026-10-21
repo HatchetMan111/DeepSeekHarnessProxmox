@@ -235,7 +235,12 @@ fi
 # ──────────────────────────── 7. Abschlussbox ───────────────────────────────
 CT_IP="$(pct exec "$CTID" -- hostname -I | tr ' ' '\n' \
   | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | grep -v '^127\.' | head -n1 || true)"
-WEB_URL="$(pct exec "$CTID" -- dsh-url 2>/dev/null || true)"
+# Absoluter Pfad: 'pct exec' hat nicht immer /usr/local/bin im PATH.
+WEB_URL="$(pct exec "$CTID" -- /usr/local/bin/dsh-url 2>/dev/null || true)"
+# Fallback: der Token-Link steht auch in der Installationsausgabe auf dem Host.
+if [[ -z "$WEB_URL" ]]; then
+  WEB_URL="$(grep -oE 'https?://[^[:space:]]+\?token=[A-Za-z0-9_-]+' "$HOST_LOG" 2>/dev/null | tail -n1 || true)"
+fi
 
 echo ""
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
@@ -246,9 +251,9 @@ if [[ -n "$WEB_URL" ]]; then
   echo -e " ${YW}Jetzt öffnen:${CL} ${WEB_URL}"
   echo -e "                  (Einmal-Login; danach gilt das Cookie 30 Tage)"
 else
-  echo -e " ${YW}Jetzt öffnen:${CL} pct exec ${CTID} -- dsh-url"
+  echo -e " ${YW}Jetzt öffnen:${CL} pct exec ${CTID} -- /usr/local/bin/dsh-url"
 fi
-echo -e " ${YW}Neuer Login:${CL} pct exec ${CTID} -- dsh-url"
+echo -e " ${YW}Neuer Login:${CL} pct exec ${CTID} -- /usr/local/bin/dsh-url"
 echo -e " ${YW}Container:${CL}  CTID ${CTID} (autostart aktiv, reboot-sicher)"
 echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  (im CT)"
 echo -e " ${YW}Logs:${CL}       journalctl -u ${APP} -e (im CT) · ${HOST_LOG} (Host)"
