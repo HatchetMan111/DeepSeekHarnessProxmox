@@ -249,10 +249,11 @@ echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━
 echo -e " ${YW}Web UI:${CL}      http://${CT_IP}:${PUBLIC_PORT}"
 if [[ -n "$WEB_URL" ]]; then
   echo -e " ${YW}Jetzt öffnen:${CL} ${WEB_URL}"
-  echo -e "                  (Einmal-Login; danach gilt das Cookie 30 Tage)"
 else
   echo -e " ${YW}Jetzt öffnen:${CL} pct exec ${CTID} -- /usr/local/bin/dsh-url"
 fi
+echo -e "                  ${BL}URL mit ?token=... öffnen – ohne Token erscheint 'authentication required'.${CL}"
+echo -e "                  Einmal-Login; danach gilt das Cookie 30 Tage."
 echo -e " ${YW}Neuer Login:${CL} pct exec ${CTID} -- /usr/local/bin/dsh-url"
 echo -e " ${YW}Container:${CL}  CTID ${CTID} (autostart aktiv, reboot-sicher)"
 echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  (im CT)"
