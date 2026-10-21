@@ -6,6 +6,8 @@ Einzeiler im Stil der [Proxmox VE Community Scripts](https://community-scripts.g
 
 - Vollständig lokal: Agent, Sessions und Credentials bleiben im Container (Telemetrie ist default-off)
 - Web UI unter `http://<CT-IP>:8080` – Login per Token-Link, danach 30 Tage Cookie
+- **FileBrowser** unter `http://<CT-IP>:8081` – direkter Dateizugriff auf `/opt/dsh`
+  (Standard-Login `admin` / `admin`, abschaltbar mit `INSTALL_FILEBROWSER=0`)
 - DeepSeek-API-Key kann **direkt bei der Installation** hinterlegt werden
 - Reboot-sicher durch systemd (`Restart=always`) + `onboot=1`
 - Idempotent: erneutes Ausführen = Update
@@ -43,6 +45,12 @@ CTID=150 CORES=4 MEM_MB=4096 DISK_GB=16 \
 | `PUBLIC_PORT`   | `8080`            | Externer Port der Web UI                         |
 | `DSH_PORT`      | `3080`            | Interner dsh-Port (nur localhost)                |
 | `DSH_VERSION`   | `0.2.1-rc.2`      | Getestete dsh-Version (`latest` = immer updaten) |
+| `INSTALL_FILEBROWSER` | `1`         | FileBrowser installieren (`0` = deaktivieren)    |
+| `FILEBROWSER_PORT` | `8081`         | Externer Port von FileBrowser                    |
+| `FILEBROWSER_USER` | `admin`        | FileBrowser-Admin-Benutzer                       |
+| `FILEBROWSER_PASSWORD` | `admin`    | FileBrowser-Admin-Passwort (Standard: admin)     |
+| `FILEBROWSER_ROOT` | `/opt/dsh`     | Freigegebenes Verzeichnis (dsh-Workspace)        |
+| `FILEBROWSER_VERSION` | `2.63.23`   | FileBrowser-Version (`latest` = immer updaten)   |
 
 ### API-Key direkt bei der Installation
 
@@ -75,15 +83,22 @@ zusätzlich nicht-fatal gegen `https://api.deepseek.com/models`.
 3. Startet `dsh web --no-open` als Service-Benutzer `dsh` **nur auf 127.0.0.1:3080**.
    nginx stellt die Web UI auf `0.0.0.0:8080` bereit und reicht **Host, Origin, Cookies
    und WebSockets unverändert** durch – die Authentifizierung bleibt vollständig bei dsh
-4. Aktiviert systemd-Services mit `enable` + `Restart=always` + `After=network-online.target`
-5. Verifiziert sich selbst:
+4. Installiert **FileBrowser** (Standard `2.63.23`) nach `/usr/local/bin/filebrowser`,
+   legt die Datenbank unter `/var/lib/dsh/filebrowser.db` an und startet ihn auf
+   `0.0.0.0:8081` mit Root `/opt/dsh` als Benutzer `dsh`
+5. Aktiviert systemd-Services mit `enable` + `Restart=always` + `After=network-online.target`
+6. Verifiziert sich selbst:
    - Token-Exchange (`303`) und Login-Cookie (`200`)
    - `randomUUID`-Polyfill für HTTP-Zugriff ohne HTTPS
    - fremder `Origin` → `403`, unauthentifizierte API → `401`
+   - FileBrowser erreichbar (`200`) und Login `admin/admin` (`200`)
    - optional: API-Key via `credentials/describe` als `configured: true`
-6. Gibt am Ende den **Token-Link** aus, mit dem die Web UI sofort nutzbar ist
+7. Gibt am Ende den **Token-Link** und die **FileBrowser-Zugangsdaten** aus
 
 Root-Passwort des neuen Containers liegt nach dem ersten Lauf in `/root/dsh-ct<CTID>.credentials`.
+Der LXC-Login ist `root` mit diesem Passwort – oder ohne Passwort per `pct enter <CTID>`.
+Der Systembenutzer `dsh` hat **keine Login-Shell**. FileBrowser hat einen eigenen Login;
+er ist nicht mit dem LXC-Root-Passwort identisch.
 
 ---
 
@@ -96,6 +111,39 @@ Root-Passwort des neuen Containers liegt nach dem ersten Lauf in `/root/dsh-ct<C
 3. **Workspace wählen** (im Container z. B. `/opt/dsh`)
 4. Ohne Key bei der Installation: **Settings → Models** → DeepSeek-API-Key eintragen
    ([platform.deepseek.com](https://platform.deepseek.com))
+
+### FileBrowser (Dateien)
+
+FileBrowser läuft parallel zur dsh-Web-UI und zeigt direkt den Workspace:
+
+- **URL:** `http://<CT-IP>:8081`
+- **Login:** `admin` / `admin` (Standard, per `FILEBROWSER_USER` / `FILEBROWSER_PASSWORD` änderbar)
+- **Root:** `/opt/dsh` (per `FILEBROWSER_ROOT` änderbar)
+- **Datenbank:** `/var/lib/dsh/filebrowser.db` (Modus `600`, Benutzer `dsh`)
+- **Credential-Datei auf dem Host:** `/root/dsh-ct<CTID>.filebrowser` (URL, IP, Port, Login, Root)
+- **Abschlussausgabe:** zeigt FileBrowser-IP, Port und Login nochmals explizit an
+
+**Passwort ändern** (empfohlen): In FileBrowser oben rechts → *Settings* → *User Management*
+→ `admin` → *Password*. Alternativ bei der Installation ein eigenes Passwort setzen:
+
+```bash
+FILEBROWSER_PASSWORD='MeinSicheresPasswort' \
+  bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)"
+```
+
+**Deaktivieren:**
+
+```bash
+INSTALL_FILEBROWSER=0 \
+  bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)"
+```
+
+Der Service wird dabei gestoppt und deaktiviert; Datenbank und Binary bleiben erhalten.
+Den Port `8081` ggf. zusätzlich in UFW/Proxmox-Firewall schließen.
+
+> **Sicherheit:** `admin/admin` ist nur für das lokale LAN gedacht. Port `8081` nicht ins
+> Internet weiterleiten. Bei einem Update bleibt ein bereits gesetztes FileBrowser-Passwort
+> erhalten (die Datenbank wird nicht überschrieben).
 
 ### Login / Token erneut holen
 
@@ -141,18 +189,20 @@ Das alte Cookie gilt für die alte IP; für die neue IP braucht man den neuen To
 
 ## Reboot-Verhalten / dokumentierter Testablauf
 
-Container (`onboot: 1`), `dsh.service` und `nginx.service` starten automatisch. Testablauf:
+Container (`onboot: 1`), `dsh.service`, `nginx.service` und – falls installiert – `filebrowser.service` starten automatisch. Testablauf:
 
 ```bash
 pct reboot <CTID>
 sleep 30
-pct exec <CTID> -- systemctl is-active dsh nginx       # → active / active
+pct exec <CTID> -- systemctl is-active dsh nginx filebrowser  # → active / active / active
 pct exec <CTID> -- curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8080/  # → 401 (ohne Cookie)
+pct exec <CTID> -- curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8081/  # → 200 (FileBrowser)
 pct exec <CTID> -- /usr/local/bin/dsh-url           # → Token-Link für den Browser
 ```
 
-Erwartung nach Neustart: beide Services `active`, Web UI antwortet (401 ohne Login),
-Token-Link über `dsh-url` abrufbar. Ein bereits eingeloggter Browser funktioniert direkt weiter.
+Erwartung nach Neustart: alle Services `active`, Web UI antwortet (401 ohne Login),
+FileBrowser antwortet (200), Token-Link über `dsh-url` abrufbar. Ein bereits eingeloggter
+Browser funktioniert direkt weiter.
 
 ---
 
@@ -170,6 +220,10 @@ Token-Link über `dsh-url` abrufbar. Ein bereits eingeloggter Browser funktionie
 | `settings are unavailable` / Models-Auswahl lädt nicht | Meist ein 401 (Token/Cookie) oder 403 (Origin). Erst `dsh-url` im selben Browser öffnen, dann Settings erneut laden. |
 | API-Key wird nicht erkannt | `pct exec <CTID> -- ls -l /var/lib/dsh/.credentials.yaml` (muss `600 dsh dsh` sein) und `journalctl -u dsh -e`. Key notfalls in **Settings → Models** neu speichern. |
 | Service down | `pct exec <CTID> -- journalctl -u dsh -e` |
+| FileBrowser nicht erreichbar | `pct exec <CTID> -- systemctl status filebrowser` und `journalctl -u filebrowser -e`; Port `8081` in UFW/Proxmox-Firewall freigeben. |
+| FileBrowser-Login `admin/admin` klappt nicht | Bei bestehender Datenbank bleibt das alte Passwort erhalten. In FileBrowser unter *Settings → User Management* ändern oder DB nur bewusst neu anlegen. |
+| FileBrowser versehentlich deaktiviert | Installer mit `INSTALL_FILEBROWSER=1` erneut ausführen (Standard). |
+| LXC-Root-Login unbekannt | `root` + Passwort aus `/root/dsh-ct<CTID>.credentials`; alternativ `pct enter <CTID>`. `dsh` ist kein Login-Benutzer. |
 | Proxy-Fehler | `pct exec <CTID> -- tail -n50 /var/log/nginx/error.log` |
 | Alles verfolgen | Einzeiler mit Debug-Ausgabe: `bash -x <(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)` |
 

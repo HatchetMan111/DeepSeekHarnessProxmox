@@ -15,6 +15,13 @@ PUBLIC_PORT="${1:-8080}"   # extern, gebunden an 0.0.0.0 durch nginx
 DSH_PORT="${2:-3080}"      # intern, nur auf 127.0.0.1 (dsh unterstützt kein 0.0.0.0)
 DSH_VERSION="${DSH_VERSION:-0.2.1-rc.2}"   # getestete Version; latest = immer updaten
 
+INSTALL_FILEBROWSER="${INSTALL_FILEBROWSER:-1}"
+FILEBROWSER_PORT="${FILEBROWSER_PORT:-8081}"
+FILEBROWSER_USER="${FILEBROWSER_USER:-admin}"
+FILEBROWSER_PASSWORD="${FILEBROWSER_PASSWORD:-admin}"
+FILEBROWSER_ROOT="${FILEBROWSER_ROOT:-/opt/dsh}"
+FILEBROWSER_VERSION="${FILEBROWSER_VERSION:-2.63.23}"
+
 APP="dsh"
 APP_NAME="DeepSeek Harness"
 DSH_USER="dsh"
@@ -32,10 +39,13 @@ fi
 
 JAR=""
 IDX_HTML=""
+FB_TMP=""
+FB_NEW_DB=0
 cleanup() {
   [[ -n "$API_KEY_FILE" ]] && rm -f "$API_KEY_FILE"
   [[ -n "$JAR" ]] && rm -f "$JAR"
   [[ -n "$IDX_HTML" ]] && rm -f "$IDX_HTML"
+  [[ -n "$FB_TMP" ]] && rm -rf "$FB_TMP"
   return 0
 }
 trap cleanup EXIT
@@ -47,6 +57,25 @@ msg_info()  { echo -e " ${INFO} ${1}"; }
 msg_ok()    { echo -e " ${CM} ${1}"; }
 msg_warn()  { echo -e " ${YW}⚠${CL} ${1}"; }
 msg_fatal() { echo -e " ${CROSS} ${1}" >&2; exit 1; }
+
+case "$INSTALL_FILEBROWSER" in
+  0|1) ;;
+  *) msg_fatal "INSTALL_FILEBROWSER muss 0 oder 1 sein." ;;
+esac
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  [[ "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
+    && (( FILEBROWSER_PORT >= 1 && FILEBROWSER_PORT <= 65535 )) \
+    || msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  [[ "$FILEBROWSER_USER" =~ ^[A-Za-z0-9._-]{1,32}$ ]] \
+    || msg_fatal "FILEBROWSER_USER: erlaubt sind 1-32 Zeichen aus [A-Za-z0-9._-]."
+  [[ "$FILEBROWSER_PASSWORD" =~ ^[A-Za-z0-9._!@#%^\&*+=-]{1,64}$ ]] \
+    || msg_fatal "FILEBROWSER_PASSWORD: erlaubt sind 1-64 Zeichen aus [A-Za-z0-9._!@#%^&*+=-]."
+  [[ "$FILEBROWSER_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || msg_fatal "FILEBROWSER_ROOT muss ein absoluter Pfad ohne Leerzeichen/Sonderzeichen sein."
+  [[ "$FILEBROWSER_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || msg_fatal "FILEBROWSER_VERSION enthält unerwartete Zeichen."
+  FILEBROWSER_VERSION="${FILEBROWSER_VERSION#v}"
+fi
 
 # ───────────────────── Vollständige Fehlermeldungskette ─────────────────────
 on_error() {
@@ -278,6 +307,96 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 msg_ok "nginx-Konfiguration gültig"
 
+# ───────────────────────── 6b. FileBrowser (optional) ───────────────────────
+# Zugriff auf den dsh-Workspace über eine Weboberfläche. Standard-Login ist
+# admin/admin (per FILEBROWSER_USER/PASSWORD überschreibbar). FileBrowser
+# läuft als dsh-Benutzer und sieht nur FILEBROWSER_ROOT, nicht /var/lib/dsh.
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  msg_info "FileBrowser wird installiert (Dateizugriff auf ${FILEBROWSER_ROOT})"
+
+  FB_ARCH="$(dpkg --print-architecture)"
+  case "$FB_ARCH" in
+    amd64|arm64) ;;
+    i386)  FB_ARCH="386" ;;
+    armhf) FB_ARCH="armv7" ;;
+    *) msg_fatal "FileBrowser: Architektur '${FB_ARCH}' wird nicht unterstützt." ;;
+  esac
+
+  FB_TMP="$(mktemp -d)"
+  if [[ "$FILEBROWSER_VERSION" == "latest" ]]; then
+    FB_URL="https://github.com/filebrowser/filebrowser/releases/latest/download/linux-${FB_ARCH}-filebrowser.tar.gz"
+  else
+    FB_URL="https://github.com/filebrowser/filebrowser/releases/download/v${FILEBROWSER_VERSION}/linux-${FB_ARCH}-filebrowser.tar.gz"
+  fi
+  msg_info "Lade FileBrowser ${FILEBROWSER_VERSION} (${FB_ARCH})"
+  curl -fsSL --retry 3 --connect-timeout 15 -o "${FB_TMP}/fb.tar.gz" "$FB_URL"
+  tar -xzf "${FB_TMP}/fb.tar.gz" -C "$FB_TMP" filebrowser
+  install -m 755 "${FB_TMP}/filebrowser" /usr/local/bin/filebrowser
+  rm -rf "$FB_TMP"
+  FB_TMP=""
+  msg_ok "FileBrowser $(/usr/local/bin/filebrowser version 2>/dev/null | head -n1)"
+
+  if [[ ! -d "$FILEBROWSER_ROOT" ]]; then
+    mkdir -p "$FILEBROWSER_ROOT"
+    chown "${DSH_USER}:${DSH_USER}" "$FILEBROWSER_ROOT"
+  fi
+
+  FB_DB="${DSH_HOME}/filebrowser.db"
+  if [[ ! -s "$FB_DB" ]]; then
+    FB_NEW_DB=1
+    msg_info "FileBrowser-Admin '${FILEBROWSER_USER}' wird angelegt"
+    # Quick-Setup mit bcrypt-Hash: umgeht die Passwort-Stärkeprüfung, damit
+    # der gewünschte Login (standardmäßig admin/admin) exakt funktioniert.
+    FB_HASH="$(/usr/local/bin/filebrowser hash "$FILEBROWSER_PASSWORD")"
+    if ! FB_PASSWORD="$FB_HASH" timeout 5 /usr/local/bin/filebrowser \
+      -d "$FB_DB" --username "$FILEBROWSER_USER" \
+      --address 127.0.0.1 --port "$FILEBROWSER_PORT" --root "$FILEBROWSER_ROOT" \
+      >/dev/null 2>&1; then
+      [[ -s "$FB_DB" ]] || msg_fatal "FileBrowser-Datenbank konnte nicht erstellt werden."
+    fi
+    msg_ok "FileBrowser-Login: ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}"
+  else
+    msg_ok "FileBrowser-Datenbank vorhanden – Login bleibt unverändert"
+  fi
+  chown "${DSH_USER}:${DSH_USER}" "$FB_DB"
+  chmod 600 "$FB_DB"
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${FILEBROWSER_PORT}/tcp" >/dev/null
+    msg_ok "UFW: Port ${FILEBROWSER_PORT}/tcp erlaubt"
+  fi
+
+  cat > /etc/systemd/system/filebrowser.service << UNIT
+[Unit]
+Description=FileBrowser – Dateizugriff auf ${FILEBROWSER_ROOT}
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=${DSH_USER}
+Group=${DSH_USER}
+Environment=HOME=${DSH_HOME}
+ExecStart=/usr/local/bin/filebrowser -d ${FB_DB} --address 0.0.0.0 --port ${FILEBROWSER_PORT} --root ${FILEBROWSER_ROOT}
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  msg_ok "FileBrowser-Service geschrieben (Port ${FILEBROWSER_PORT})"
+else
+  # Deaktivieren, aber Daten (DB) und Binary bewusst nicht löschen.
+  if [[ -f /etc/systemd/system/filebrowser.service ]]; then
+    systemctl disable --now filebrowser >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/filebrowser.service
+    systemctl daemon-reload
+    msg_ok "FileBrowser deaktiviert (Daten bleiben in ${DSH_HOME} erhalten)"
+  fi
+fi
+
 # ───────────────────────── 7. systemd-Unit ──────────────────────────────────
 msg_info "systemd-Unit wird geschrieben (/etc/systemd/system/${APP}.service)"
 cat > "/etc/systemd/system/${APP}.service" << UNIT
@@ -309,11 +428,17 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable nginx "$APP" >/dev/null 2>&1
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  systemctl enable filebrowser >/dev/null 2>&1
+fi
 systemctl restart nginx
 # Zeitstempel vor dem Start: verhindert, dass die Verifikation den Token
 # eines vorherigen dsh-Prozesses aus dem selben Boot erwischt.
 START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 systemctl restart "$APP"
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  systemctl restart filebrowser
+fi
 msg_ok "Services aktiviert (enable + restart)"
 
 # ───────────────────────── 8. Verifikation ──────────────────────────────────
@@ -322,6 +447,31 @@ if ! systemctl is-active --quiet "$APP"; then
   msg_fatal "Service '${APP}' läuft nicht – Logausgabe siehe oben (Fehlerkette)."
 fi
 msg_ok "Service '${APP}' ist aktiv"
+
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  if ! systemctl is-active --quiet filebrowser; then
+    journalctl -u filebrowser -n 50 --no-pager || true
+    msg_fatal "Service 'filebrowser' läuft nicht – Logausgabe siehe oben."
+  fi
+  FB_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${FILEBROWSER_PORT}/" || true)"
+  if [[ "$FB_CODE" != "200" ]]; then
+    journalctl -u filebrowser -n 50 --no-pager || true
+    msg_fatal "FileBrowser antwortet nicht (HTTP ${FB_CODE}) – Service/Port prüfen."
+  fi
+  msg_ok "FileBrowser erreichbar (HTTP 200, Port ${FILEBROWSER_PORT})"
+
+  if [[ "$FB_NEW_DB" == "1" ]]; then
+    FB_LOGIN_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${FILEBROWSER_USER}\",\"password\":\"${FILEBROWSER_PASSWORD}\"}" \
+      "http://127.0.0.1:${FILEBROWSER_PORT}/api/login" || true)"
+    if [[ "$FB_LOGIN_CODE" != "200" ]]; then
+      msg_fatal "FileBrowser-Login '${FILEBROWSER_USER}' fehlgeschlagen (HTTP ${FB_LOGIN_CODE})."
+    fi
+    msg_ok "FileBrowser-Login '${FILEBROWSER_USER}' funktioniert (HTTP 200)"
+  fi
+fi
 
 CT_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' \
   | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' \
@@ -411,8 +561,12 @@ if [[ -n "${API_KEY}" ]]; then
 fi
 
 if command -v ss >/dev/null 2>&1; then
+  LISTEN_PORTS="${PUBLIC_PORT}|${DSH_PORT}"
+  if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+    LISTEN_PORTS+="|${FILEBROWSER_PORT}"
+  fi
   LISTEN_OK="$(ss -tln 2>/dev/null | awk '{print $4}' \
-    | grep -E ":(${PUBLIC_PORT}|${DSH_PORT})$" | sort -u || true)"
+    | grep -E ":(${LISTEN_PORTS})$" | sort -u || true)"
   msg_ok "Lauschende Sockets: ${LISTEN_OK//$'\n'/ · }"
 fi
 
@@ -425,6 +579,20 @@ echo -e " ${YW}Web UI:${CL}      ${ROOT_URL}"
 echo -e " ${YW}Jetzt öffnen:${CL} ${WEB_URL}"
 echo -e "                  (Einmal-Login; danach gilt das Cookie 30 Tage)"
 echo -e " ${YW}Neuer Login:${CL} im Container: ${BL}dsh-url${CL}"
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  echo -e " ${YW}FileBrowser:${CL} http://${CT_IP}:${FILEBROWSER_PORT}"
+  echo -e " ${YW}FB-IP:${CL}       ${CT_IP}"
+  echo -e " ${YW}FB-Port:${CL}     ${FILEBROWSER_PORT}"
+  if [[ "$FB_NEW_DB" == "1" ]]; then
+    echo -e " ${YW}FB-Login:${CL}    ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}"
+  else
+    echo -e " ${YW}FB-Login:${CL}    ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}  (Initial-Login, ggf. geändert)"
+  fi
+  echo -e " ${YW}FB-Root:${CL}     ${FILEBROWSER_ROOT}"
+  if [[ "$FILEBROWSER_PASSWORD" == "admin" && "$FB_NEW_DB" == "1" ]]; then
+    echo -e "                  ${RD}Bitte admin/admin ändern und nicht ins Internet stellen.${CL}"
+  fi
+fi
 if [[ -n "${API_KEY}" ]]; then
   echo -e " ${YW}API-Key:${CL}     hinterlegt und aktiv – Models-Auswahl sofort nutzbar"
 else

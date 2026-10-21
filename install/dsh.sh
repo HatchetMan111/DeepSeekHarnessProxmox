@@ -41,6 +41,14 @@ PUBLIC_PORT="${PUBLIC_PORT:-8080}"  # extern erreichbarer Port (nginx)
 DSH_PORT="${DSH_PORT:-3080}"        # interner dsh-Port (nur 127.0.0.1)
 DSH_VERSION="${DSH_VERSION:-0.2.1-rc.2}"  # getestet; "latest" für Auto-Update
 
+# FileBrowser: Dateizugriff auf den dsh-Workspace (optional, standardmäßig an)
+INSTALL_FILEBROWSER="${INSTALL_FILEBROWSER:-1}"
+FILEBROWSER_PORT="${FILEBROWSER_PORT:-8081}"
+FILEBROWSER_USER="${FILEBROWSER_USER:-admin}"
+FILEBROWSER_PASSWORD="${FILEBROWSER_PASSWORD:-admin}"
+FILEBROWSER_ROOT="${FILEBROWSER_ROOT:-/opt/dsh}"
+FILEBROWSER_VERSION="${FILEBROWSER_VERSION:-2.63.23}"
+
 INNER_FILE="dsh-inner.sh"
 INNER_URL="${INNER_URL:-${RAW_BASE}/install/${INNER_FILE}}"
 HOST_LOG="/tmp/${APP}-install-$(date +%Y%m%d-%H%M%S).log"
@@ -62,6 +70,25 @@ msg_fatal() { echo -e " ${CROSS} ${1}" >&2; exit 1; }
 
 [[ "$DSH_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
   || msg_fatal "DSH_VERSION enthält unerwartete Zeichen (erlaubt: [A-Za-z0-9._-])."
+
+case "$INSTALL_FILEBROWSER" in
+  0|1) ;;
+  *) msg_fatal "INSTALL_FILEBROWSER muss 0 oder 1 sein." ;;
+esac
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  [[ "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
+    && (( FILEBROWSER_PORT >= 1 && FILEBROWSER_PORT <= 65535 )) \
+    || msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  [[ "$FILEBROWSER_USER" =~ ^[A-Za-z0-9._-]{1,32}$ ]] \
+    || msg_fatal "FILEBROWSER_USER: erlaubt sind 1-32 Zeichen aus [A-Za-z0-9._-]."
+  [[ "$FILEBROWSER_PASSWORD" =~ ^[A-Za-z0-9._!@#%^\&*+=-]{1,64}$ ]] \
+    || msg_fatal "FILEBROWSER_PASSWORD: erlaubt sind 1-64 Zeichen aus [A-Za-z0-9._!@#%^&*+=-]."
+  [[ "$FILEBROWSER_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || msg_fatal "FILEBROWSER_ROOT muss ein absoluter Pfad ohne Leerzeichen/Sonderzeichen sein."
+  [[ "$FILEBROWSER_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || msg_fatal "FILEBROWSER_VERSION enthält unerwartete Zeichen."
+  FILEBROWSER_VERSION="${FILEBROWSER_VERSION#v}"
+fi
 
 # ───────────────────── Vollständige Fehlermeldungskette ─────────────────────
 on_error() {
@@ -221,14 +248,20 @@ fi
 # pipefail stellt sicher, dass ein Fehler des Inner-Scripts hier ankommt.
 set -o pipefail
 msg_info "Installiere ${APP_NAME} im Container (Log: ${HOST_LOG})"
+INNER_ENV=(
+  "DSH_VERSION=${DSH_VERSION}"
+  "INSTALL_FILEBROWSER=${INSTALL_FILEBROWSER}"
+  "FILEBROWSER_PORT=${FILEBROWSER_PORT}"
+  "FILEBROWSER_USER=${FILEBROWSER_USER}"
+  "FILEBROWSER_PASSWORD=${FILEBROWSER_PASSWORD}"
+  "FILEBROWSER_ROOT=${FILEBROWSER_ROOT}"
+  "FILEBROWSER_VERSION=${FILEBROWSER_VERSION}"
+)
 if [[ -n "$KEY_FILE_CT" ]]; then
-  pct exec "$CTID" -- env \
-    "DSH_API_KEY_FILE=${KEY_FILE_CT}" \
-    "DSH_VERSION=${DSH_VERSION}" \
+  pct exec "$CTID" -- env "DSH_API_KEY_FILE=${KEY_FILE_CT}" "${INNER_ENV[@]}" \
     bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" 2>&1 | tee "$HOST_LOG"
 else
-  pct exec "$CTID" -- env \
-    "DSH_VERSION=${DSH_VERSION}" \
+  pct exec "$CTID" -- env "${INNER_ENV[@]}" \
     bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" 2>&1 | tee "$HOST_LOG"
 fi
 
@@ -240,6 +273,17 @@ WEB_URL="$(pct exec "$CTID" -- /usr/local/bin/dsh-url 2>/dev/null || true)"
 # Fallback: der Token-Link steht auch in der Installationsausgabe auf dem Host.
 if [[ -z "$WEB_URL" ]]; then
   WEB_URL="$(grep -oE 'https?://[^[:space:]]+\?token=[A-Za-z0-9_-]+' "$HOST_LOG" 2>/dev/null | tail -n1 || true)"
+fi
+
+FB_CRED_FILE="/root/${APP}-ct${CTID}.filebrowser"
+FB_CRED_NEW=0
+if [[ "$INSTALL_FILEBROWSER" == "1" && ! -f "$FB_CRED_FILE" ]]; then
+  printf 'FileBrowser: http://%s:%s\nIP: %s\nPort: %s\nLogin: %s / %s\nRoot: %s\n' \
+    "$CT_IP" "$FILEBROWSER_PORT" "$CT_IP" "$FILEBROWSER_PORT" \
+    "$FILEBROWSER_USER" "$FILEBROWSER_PASSWORD" "$FILEBROWSER_ROOT" \
+    > "$FB_CRED_FILE"
+  chmod 600 "$FB_CRED_FILE"
+  FB_CRED_NEW=1
 fi
 
 echo ""
@@ -255,11 +299,32 @@ fi
 echo -e "                  ${BL}URL mit ?token=... öffnen – ohne Token erscheint 'authentication required'.${CL}"
 echo -e "                  Einmal-Login; danach gilt das Cookie 30 Tage."
 echo -e " ${YW}Neuer Login:${CL} pct exec ${CTID} -- /usr/local/bin/dsh-url"
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  echo -e " ${YW}FileBrowser:${CL} http://${CT_IP}:${FILEBROWSER_PORT}"
+  echo -e " ${YW}FB-IP:${CL}       ${CT_IP}"
+  echo -e " ${YW}FB-Port:${CL}     ${FILEBROWSER_PORT}"
+  if [[ "$FB_CRED_NEW" == "1" ]]; then
+    echo -e " ${YW}FB-Login:${CL}    ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}"
+  else
+    echo -e " ${YW}FB-Login:${CL}    ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}  (Initial-Login, ggf. in FileBrowser geändert)"
+  fi
+  echo -e " ${YW}FB-Root:${CL}     ${FILEBROWSER_ROOT} (dsh-Workspace)"
+  if [[ "$FILEBROWSER_PASSWORD" == "admin" && "$FB_CRED_NEW" == "1" ]]; then
+    echo -e "                  ${RD}Bitte admin/admin ändern – nicht ins Internet stellen.${CL}"
+  fi
+fi
 echo -e " ${YW}Container:${CL}  CTID ${CTID} (autostart aktiv, reboot-sicher)"
-echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  (im CT)"
+if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
+  echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  ·  systemctl status filebrowser  (im CT)"
+else
+  echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  (im CT)"
+fi
 echo -e " ${YW}Logs:${CL}       journalctl -u ${APP} -e (im CT) · ${HOST_LOG} (Host)"
 if [[ "$UPDATE_MODE" -eq 0 ]]; then
   echo -e " ${YW}Login-Daten:${CL} /root/${APP}-ct${CTID}.credentials"
+fi
+if [[ "$INSTALL_FILEBROWSER" == "1" && -f "$FB_CRED_FILE" ]]; then
+  echo -e " ${YW}FB-Credentials:${CL} ${FB_CRED_FILE}"
 fi
 echo -e ""
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
