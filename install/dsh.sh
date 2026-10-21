@@ -31,23 +31,27 @@ STORAGE="${STORAGE:-auto}"          # "auto" → erste aktive Storage mit rootdi
 VZTMP_STORAGE="${VZTMP_STORAGE:-local}"   # Storage für das Debian-Template
 NET_BRIDGE="${NET_BRIDGE:-vmbr0}"
 
-PCT_OSTYPE="${PCT_OSTYPE:-debian}"
 PCT_OSVERSION="${PCT_OSVERSION:-12}"
 CORES="${CORES:-2}"
-MEM_MB="${MEM_MB:-2048}"
-SWAP_MB="${SWAP_MB:-512}"
-DISK_GB="${DISK_GB:-8}"
+MEM_MB="${MEM_MB:-4096}"            # npm/dsh + Agent-Sessions brauchen Luft
+SWAP_MB="${SWAP_MB:-1024}"
+DISK_GB="${DISK_GB:-16}"
 
 PUBLIC_PORT="${PUBLIC_PORT:-8080}"  # extern erreichbarer Port (nginx)
 DSH_PORT="${DSH_PORT:-3080}"        # interner dsh-Port (nur 127.0.0.1)
+DSH_VERSION="${DSH_VERSION:-0.2.1-rc.2}"  # getestet; "latest" für Auto-Update
 
 INNER_FILE="dsh-inner.sh"
+INNER_URL="${INNER_URL:-${RAW_BASE}/install/${INNER_FILE}}"
 HOST_LOG="/tmp/${APP}-install-$(date +%Y%m%d-%H%M%S).log"
 
 # DeepSeek-API-Key: optional per Umgebungsvariable setzen (Automatisierung),
 # sonst wird bei interaktivem Lauf danach gefragt. Leer = überspringen
 # (Key kann jederzeit in der Web UI unter Settings → Models eingetragen werden).
 DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+KEY_FILE_HOST=""
+cleanup() { if [[ -n "${KEY_FILE_HOST:-}" ]]; then rm -f "$KEY_FILE_HOST"; fi; }
+trap cleanup EXIT
 
 # ───────────────────────────── Ausgabe-Helfer ───────────────────────────────
 YW='\033[33m'; GN='\033[1;92m'; RD='\033[01;31m'; BL='\033[36m'; CL='\033[m'
@@ -55,6 +59,9 @@ CM="${GN}✔${CL}"; CROSS="${RD}✘${CL}"; INFO="${BL}ℹ${CL}"
 msg_info()  { echo -e " ${INFO} ${1}"; }
 msg_ok()    { echo -e " ${CM} ${1}"; }
 msg_fatal() { echo -e " ${CROSS} ${1}" >&2; exit 1; }
+
+[[ "$DSH_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || msg_fatal "DSH_VERSION enthält unerwartete Zeichen (erlaubt: [A-Za-z0-9._-])."
 
 # ───────────────────── Vollständige Fehlermeldungskette ─────────────────────
 on_error() {
@@ -70,7 +77,7 @@ on_error() {
   fi
   echo -e "${YW} Debug-Tipps:${CL}" >&2
   echo -e "  • Kompletten Ablauf verfolgen : bash -x <(wget -qLO - ${RAW_BASE}/install/dsh.sh)" >&2
-  echo -e "  · Im Container nachschauen   : pct console <CTID>  →  Log: journalctl -u ${APP} -e" >&2
+  echo -e "  · Im Container nachschauen   : pct enter <CTID>  →  Log: journalctl -u ${APP} -e" >&2
   echo -e "${RD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}" >&2
   exit "$ec"
 }
@@ -86,19 +93,34 @@ echo -e "${GN} ${APP_NAME} – LXC Installer (Community-Scripts-Stil)${CL}"
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 # ─────────────────── Optional: DeepSeek-API-Key beschaffen ──────────────────
-if [[ -z "$DEEPSEEK_API_KEY" && -t 0 ]]; then
-  echo ""
-  echo -e " ${YW}Optional: DeepSeek-API-Key hinterlegen${CL}"
-  echo -e " Der Key wird nur lokal im Container gespeichert (${YW}/var/lib/dsh/.credentials.yaml${CL}, Modus 600)."
-  echo -e " Überspringen mit Enter – konfigurierbar jederzeit in der Web UI (Settings → Models)."
-  read -rs -p " API-Key [Enter = überspringen]: " DEEPSEEK_API_KEY
-  echo ""
+if [[ -z "$DEEPSEEK_API_KEY" ]]; then
+  # Auch bei "curl | bash" funktioniert die Abfrage über das Terminal.
+  TTY_IN=""
+  if [[ -t 0 ]]; then
+    TTY_IN="/dev/stdin"
+  elif (exec 3</dev/tty) 2>/dev/null; then
+    TTY_IN="/dev/tty"
+  fi
+  if [[ -n "$TTY_IN" ]]; then
+    echo ""
+    echo -e " ${YW}Optional: DeepSeek-API-Key hinterlegen${CL}"
+    echo -e " Der Key wird nur lokal im Container gespeichert (${YW}/var/lib/dsh/.credentials.yaml${CL}, Modus 600)."
+    echo -e " Überspringen mit Enter – konfigurierbar jederzeit in der Web UI (Settings → Models)."
+    if ! read -rs -p " API-Key [Enter = überspringen]: " DEEPSEEK_API_KEY < "$TTY_IN"; then
+      DEEPSEEK_API_KEY=""
+    fi
+    echo ""
+  else
+    msg_info "Kein Terminal für die Key-Abfrage – übersprungen (später in Settings → Models)."
+  fi
 fi
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY//[[:space:]]/}"
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY#Bearer }"
 if [[ -n "$DEEPSEEK_API_KEY" ]]; then
   if [[ ! "$DEEPSEEK_API_KEY" =~ ^[A-Za-z0-9_.-]{20,}$ ]]; then
     msg_fatal "API-Key hat unerwartetes Format (mind. 20 Zeichen aus [A-Za-z0-9_.-] erwartet)."
   fi
-  KEY_FILE_HOST="/tmp/.dsh-apikey.$$"
+  KEY_FILE_HOST="$(mktemp /tmp/.dsh-apikey.XXXXXX)"
   printf '%s' "$DEEPSEEK_API_KEY" > "$KEY_FILE_HOST"
   chmod 600 "$KEY_FILE_HOST"
 fi
@@ -158,6 +180,8 @@ if [[ "$UPDATE_MODE" -eq 0 ]]; then
 else
   msg_info "Container wird gestartet (falls gestoppt)"
   pct start "$CTID" 2>/dev/null || true
+  # Auch bei bestehenden CTs Reboot-Sicherheit erzwingen.
+  pct set "$CTID" --onboot 1 >/dev/null
 fi
 
 # ─────────────── 4. Auf Netzwerk im Container warten ────────────────────────
@@ -175,16 +199,21 @@ msg_info "Bootstrap-Pakete im Container"
 pct exec "$CTID" -- bash -c \
   "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq ca-certificates wget >/dev/null"
 
-msg_info "Lade Installations-Script: ${RAW_BASE}/install/${INNER_FILE}"
-pct exec "$CTID" -- wget -qO "/tmp/${INNER_FILE}" "${RAW_BASE}/install/${INNER_FILE}"
+msg_info "Lade Installations-Script: ${INNER_URL}"
+pct exec "$CTID" -- wget -qO "/tmp/${INNER_FILE}" "${INNER_URL}"
 
-# API-Key (falls gesetzt) ohne Prozesslisten-Exposition in den CT pushen
+# API-Key (falls gesetzt) ohne Prozesslisten-Exposition in den CT pushen.
+# Das Inner-Script liest die Datei und löscht sie sofort wieder.
 KEY_FILE_CT=""
 if [[ -n "${DEEPSEEK_API_KEY:-}" && -f "${KEY_FILE_HOST:-}" ]]; then
   KEY_FILE_CT="/tmp/.dsh-apikey"
   pct push "$CTID" "$KEY_FILE_HOST" "$KEY_FILE_CT" >/dev/null
   pct exec "$CTID" -- chmod 600 "$KEY_FILE_CT"
   rm -f "$KEY_FILE_HOST"
+  KEY_FILE_HOST=""
+else
+  # Keine Altlasten von abgebrochenen Läufen im Container.
+  pct exec "$CTID" -- rm -f /tmp/.dsh-apikey
 fi
 
 # ──────────────── 6. Installation im Container ausführen ────────────────────
@@ -193,20 +222,33 @@ fi
 set -o pipefail
 msg_info "Installiere ${APP_NAME} im Container (Log: ${HOST_LOG})"
 if [[ -n "$KEY_FILE_CT" ]]; then
-  pct exec "$CTID" -- bash -c \
-    "API_KEY=\$(cat '$KEY_FILE_CT'); rm -f '$KEY_FILE_CT'; bash '/tmp/${INNER_FILE}' '${PUBLIC_PORT}' '${DSH_PORT}' \"\$API_KEY\"" 2>&1 | tee "$HOST_LOG"
+  pct exec "$CTID" -- env \
+    "DSH_API_KEY_FILE=${KEY_FILE_CT}" \
+    "DSH_VERSION=${DSH_VERSION}" \
+    bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" 2>&1 | tee "$HOST_LOG"
 else
-  pct exec "$CTID" -- bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" "" 2>&1 | tee "$HOST_LOG"
+  pct exec "$CTID" -- env \
+    "DSH_VERSION=${DSH_VERSION}" \
+    bash "/tmp/${INNER_FILE}" "$PUBLIC_PORT" "$DSH_PORT" 2>&1 | tee "$HOST_LOG"
 fi
 
 # ──────────────────────────── 7. Abschlussbox ───────────────────────────────
-CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
+CT_IP="$(pct exec "$CTID" -- hostname -I | tr ' ' '\n' \
+  | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | grep -v '^127\.' | head -n1 || true)"
+WEB_URL="$(pct exec "$CTID" -- dsh-url 2>/dev/null || true)"
 
 echo ""
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo -e "${GN} ${APP_NAME} erfolgreich installiert!${CL}"
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-echo -e " ${YW}Web UI:${CL}     http://${CT_IP}:${PUBLIC_PORT}"
+echo -e " ${YW}Web UI:${CL}      http://${CT_IP}:${PUBLIC_PORT}"
+if [[ -n "$WEB_URL" ]]; then
+  echo -e " ${YW}Jetzt öffnen:${CL} ${WEB_URL}"
+  echo -e "                  (Einmal-Login; danach gilt das Cookie 30 Tage)"
+else
+  echo -e " ${YW}Jetzt öffnen:${CL} pct exec ${CTID} -- dsh-url"
+fi
+echo -e " ${YW}Neuer Login:${CL} pct exec ${CTID} -- dsh-url"
 echo -e " ${YW}Container:${CL}  CTID ${CTID} (autostart aktiv, reboot-sicher)"
 echo -e " ${YW}Services:${CL}   systemctl status ${APP}  ·  systemctl status nginx  (im CT)"
 echo -e " ${YW}Logs:${CL}       journalctl -u ${APP} -e (im CT) · ${HOST_LOG} (Host)"
@@ -217,7 +259,7 @@ echo -e ""
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
   echo -e " ${YW}API-Key:${CL}     hinterlegt (Settings → Models zeigt ihn als konfiguriert)"
 else
-  echo -e " ${YW}Nächster Schritt:${CL} Web UI öffnen → Settings → Models → DeepSeek-API-Key"
+  echo -e " ${YW}Falls nötig:${CL}   Web UI → Settings → Models → DeepSeek-API-Key"
 fi
 echo -e " Erste Session: Workspace wählen (z. B. /opt/dsh), dann loslegen."
 echo -e " Update = Einzeiler einfach erneut ausführen (idempotent)."

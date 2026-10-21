@@ -12,20 +12,21 @@ Description=DeepSeek Harness Web UI (dsh)
 Documentation=https://github.com/deepseek-ai/deepseek-harness
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=dsh
 Group=dsh
 WorkingDirectory=/opt/dsh
+Environment=HOME=/var/lib/dsh
 Environment=DSH_HOME=/var/lib/dsh
 Environment=DSH_PORT=3080
 Environment=PUBLIC_PORT=8080
-# '+' = mit Root-Rechten (schreibt /etc/nginx/conf.d/dsh-origin.conf)
-ExecStartPre=+/usr/local/bin/dsh-render-origin-map.sh
 ExecStart=/usr/local/bin/dsh-start.sh
 Restart=always
 RestartSec=5
+TimeoutStartSec=180
 TimeoutStopSec=30
 
 [Install]
