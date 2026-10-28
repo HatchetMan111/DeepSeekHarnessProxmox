@@ -151,6 +151,12 @@ Den Port `8081` ggf. zusätzlich in UFW/Proxmox-Firewall schließen.
 > Internet weiterleiten. Bei einem Update bleibt ein bereits gesetztes FileBrowser-Passwort
 > erhalten (die Datenbank wird nicht überschrieben).
 
+**Abgebrochenes Setup / unvollständige Datenbank:** Der Installer wartet beim Anlegen
+auf die fertige Datenbank (Meldung `Listening on`), statt nach einem festen Timeout
+abzubrechen. Eine unvollständige `filebrowser.db` – etwa nach einem harten Abbruch –
+erkennt er beim nächsten Lauf, sichert sie als `filebrowser.db.broken-<Zeitstempel>`
+und legt sie neu an. Bei einer intakten Datenbank bleibt das Login unverändert.
+
 ### Plugins
 
 Plugins werden im Profil des Containers mit **pnpm** installiert. Der Installer
@@ -255,6 +261,7 @@ FileBrowser antwortet (200), `pnpm` ist als Benutzer `dsh` ausführbar, Token-Li
 | Service down | `pct exec <CTID> -- journalctl -u dsh -e` |
 | FileBrowser nicht erreichbar | `pct exec <CTID> -- systemctl status filebrowser` und `journalctl -u filebrowser -e`; Port `8081` in UFW/Proxmox-Firewall freigeben. |
 | FileBrowser-Login `admin/admin` klappt nicht | Bei bestehender Datenbank bleibt das alte Passwort erhalten. In FileBrowser unter *Settings → User Management* ändern oder DB nur bewusst neu anlegen. |
+| `filebrowser.service` startet nicht: `Error: the resource does not exist` | Unvollständige Bolt-Datenbank (z. B. abgebrochenes Setup). Installer erneut ausführen – er erkennt die defekte DB, sichert sie als `filebrowser.db.broken-*` und legt sie neu an. Alternativ manuell: `systemctl stop filebrowser && mv /var/lib/dsh/filebrowser.db /var/lib/dsh/filebrowser.db.bak`, dann Installer erneut starten. |
 | FileBrowser versehentlich deaktiviert | Installer mit `INSTALL_FILEBROWSER=1` erneut ausführen (Standard). |
 | LXC-Root-Login unbekannt | `root` + Passwort aus `/root/dsh-ct<CTID>.credentials`; alternativ `pct enter <CTID>`. `dsh` ist kein Login-Benutzer. |
 | Proxy-Fehler | `pct exec <CTID> -- tail -n50 /var/log/nginx/error.log` |

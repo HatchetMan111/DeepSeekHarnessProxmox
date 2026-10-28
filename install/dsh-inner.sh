@@ -45,12 +45,16 @@ fi
 JAR=""
 IDX_HTML=""
 FB_TMP=""
+FB_PID=""
+FB_SETUP_LOG=""
 FB_NEW_DB=0
 cleanup() {
   [[ -n "$API_KEY_FILE" ]] && rm -f "$API_KEY_FILE"
   [[ -n "$JAR" ]] && rm -f "$JAR"
   [[ -n "$IDX_HTML" ]] && rm -f "$IDX_HTML"
   [[ -n "$FB_TMP" ]] && rm -rf "$FB_TMP"
+  [[ -n "$FB_SETUP_LOG" ]] && rm -f "$FB_SETUP_LOG"
+  [[ -n "$FB_PID" ]] && kill "$FB_PID" 2>/dev/null
   return 0
 }
 trap cleanup EXIT
@@ -386,18 +390,72 @@ if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
   fi
 
   FB_DB="${DSH_HOME}/filebrowser.db"
-  if [[ ! -s "$FB_DB" ]]; then
+
+  # Laufenden Dienst anhalten: Setup und Reparatur schreiben exklusiv in die DB.
+  systemctl stop filebrowser >/dev/null 2>&1 || true
+
+  # Eine vorhandene DB kann von einem abgebrochenen Setup unvollständig sein
+  # (Bolt-Datei ohne Settings → "the resource does not exist" beim Start).
+  # 'config cat' liest die Settings und erkennt solche Dateien zuverlässig.
+  FB_DB_OK=0
+  if [[ -s "$FB_DB" ]] \
+    && /usr/local/bin/filebrowser config cat -d "$FB_DB" >/dev/null 2>&1; then
+    FB_DB_OK=1
+  fi
+  if [[ -s "$FB_DB" && "$FB_DB_OK" != "1" ]]; then
+    FB_DB_BROKEN="${FB_DB}.broken-$(date +%Y%m%d-%H%M%S)"
+    mv "$FB_DB" "$FB_DB_BROKEN"
+    msg_warn "Unvollständige FileBrowser-Datenbank gesichert (${FB_DB_BROKEN}) – wird neu angelegt"
+  fi
+
+  if [[ "$FB_DB_OK" != "1" ]]; then
     FB_NEW_DB=1
     msg_info "FileBrowser-Admin '${FILEBROWSER_USER}' wird angelegt"
     # Quick-Setup mit bcrypt-Hash: umgeht die Passwort-Stärkeprüfung, damit
     # der gewünschte Login (standardmäßig admin/admin) exakt funktioniert.
     FB_HASH="$(/usr/local/bin/filebrowser hash "$FILEBROWSER_PASSWORD")"
-    if ! FB_PASSWORD="$FB_HASH" timeout 5 /usr/local/bin/filebrowser \
+    FB_SETUP_LOG="$(mktemp)"
+    FB_PASSWORD="$FB_HASH" /usr/local/bin/filebrowser \
       -d "$FB_DB" --username "$FILEBROWSER_USER" \
       --address 127.0.0.1 --port "$FILEBROWSER_PORT" --root "$FILEBROWSER_ROOT" \
-      >/dev/null 2>&1; then
-      [[ -s "$FB_DB" ]] || msg_fatal "FileBrowser-Datenbank konnte nicht erstellt werden."
+      >"$FB_SETUP_LOG" 2>&1 &
+    FB_PID=$!
+
+    # Nicht nach festen 5 s abbrechen (das hinterlässt genau die halbe DB),
+    # sondern auf die erste fertige Servermeldung warten: "Listening on"
+    # erscheint erst nach Quick-Setup und erfolgreichem Settings-Laden.
+    FB_READY=0
+    for _ in $(seq 1 150); do   # max. 30 s
+      if grep -q "Listening on" "$FB_SETUP_LOG" 2>/dev/null; then
+        FB_READY=1
+        break
+      fi
+      kill -0 "$FB_PID" 2>/dev/null || break
+      sleep 0.2
+    done
+
+    # Setup-Server kontrolliert beenden (SIGTERM, dann SIGKILL als Fallback).
+    if kill -0 "$FB_PID" 2>/dev/null; then
+      kill "$FB_PID" 2>/dev/null || true
+      for _ in $(seq 1 25); do
+        kill -0 "$FB_PID" 2>/dev/null || break
+        sleep 0.2
+      done
+      kill -9 "$FB_PID" 2>/dev/null || true
     fi
+    wait "$FB_PID" 2>/dev/null || true
+    FB_PID=""
+
+    # Doppelte Absicherung: DB muss nach dem Setup lesbare Settings enthalten.
+    if [[ "$FB_READY" != "1" ]] \
+      || ! /usr/local/bin/filebrowser config cat -d "$FB_DB" >/dev/null 2>&1; then
+      cat "$FB_SETUP_LOG" >&2 || true
+      rm -f "$FB_SETUP_LOG" "$FB_DB"
+      FB_SETUP_LOG=""
+      msg_fatal "FileBrowser-Initialisierung fehlgeschlagen (Details im Log oben)."
+    fi
+    rm -f "$FB_SETUP_LOG"
+    FB_SETUP_LOG=""
     msg_ok "FileBrowser-Login: ${FILEBROWSER_USER} / ${FILEBROWSER_PASSWORD}"
   else
     msg_ok "FileBrowser-Datenbank vorhanden – Login bleibt unverändert"
