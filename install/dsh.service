@@ -23,6 +23,8 @@ Environment=HOME=/var/lib/dsh
 Environment=DSH_HOME=/var/lib/dsh
 Environment=DSH_PORT=3080
 Environment=PUBLIC_PORT=8080
+# pnpm (Plugin-Manager) liegt je nach npm-Prefix in /usr/bin oder /usr/local/bin.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/dsh-start.sh
 Restart=always
 RestartSec=5

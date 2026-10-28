@@ -22,6 +22,11 @@ FILEBROWSER_PASSWORD="${FILEBROWSER_PASSWORD:-admin}"
 FILEBROWSER_ROOT="${FILEBROWSER_ROOT:-/opt/dsh}"
 FILEBROWSER_VERSION="${FILEBROWSER_VERSION:-2.63.23}"
 
+# pnpm wird vom dsh-Plugin-Manager als eigener Prozess aufgerufen
+# ('pnpm view' / 'pnpm add'). Ohne pnpm scheitern Plugin-Suche und -Installation
+# mit "spawn pnpm ENOENT" bzw. "pnpm was not found".
+PNPM_VERSION="${PNPM_VERSION:-12.15.0}"
+
 APP="dsh"
 APP_NAME="DeepSeek Harness"
 DSH_USER="dsh"
@@ -63,9 +68,10 @@ case "$INSTALL_FILEBROWSER" in
   *) msg_fatal "INSTALL_FILEBROWSER muss 0 oder 1 sein." ;;
 esac
 if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
-  [[ "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
-    && (( FILEBROWSER_PORT >= 1 && FILEBROWSER_PORT <= 65535 )) \
-    || msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  if [[ ! "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
+    || (( FILEBROWSER_PORT < 1 || FILEBROWSER_PORT > 65535 )); then
+    msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  fi
   [[ "$FILEBROWSER_USER" =~ ^[A-Za-z0-9._-]{1,32}$ ]] \
     || msg_fatal "FILEBROWSER_USER: erlaubt sind 1-32 Zeichen aus [A-Za-z0-9._-]."
   [[ "$FILEBROWSER_PASSWORD" =~ ^[A-Za-z0-9._!@#%^\&*+=-]{1,64}$ ]] \
@@ -76,6 +82,11 @@ if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
     || msg_fatal "FILEBROWSER_VERSION enthält unerwartete Zeichen."
   FILEBROWSER_VERSION="${FILEBROWSER_VERSION#v}"
 fi
+
+[[ "$PNPM_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || msg_fatal "PNPM_VERSION enthält unerwartete Zeichen (erlaubt: [A-Za-z0-9._-])."
+PNPM_VERSION="${PNPM_VERSION#v}"
+[[ -n "$PNPM_VERSION" ]] || msg_fatal "PNPM_VERSION darf nicht leer sein."
 
 # ───────────────────── Vollständige Fehlermeldungskette ─────────────────────
 on_error() {
@@ -139,6 +150,39 @@ mkdir -p "$DSH_WORKDIR" "$DSH_HOME"
 chown -R "${DSH_USER}:${DSH_USER}" "$DSH_WORKDIR" "$DSH_HOME"
 chmod 750 "$DSH_HOME"
 msg_ok "Benutzer '${DSH_USER}' · Home ${DSH_HOME} · Arbeitsverzeichnis ${DSH_WORKDIR}"
+
+# ─────────────── 3b. pnpm – Pflicht für den dsh-Plugin-Manager ──────────────
+# Der Plugin-Manager startet 'pnpm view' bzw. 'pnpm add' als eigenen Prozess.
+# Fehlt die Binärdatei, brechen Plugin-Suche und -Installation mit
+# "spawn pnpm ENOENT" ab – deshalb wird pnpm hier immer sichergestellt.
+PNPM_HAVE="$(pnpm --version 2>/dev/null || true)"
+if [[ -z "$PNPM_HAVE" || "$PNPM_VERSION" == "latest" || "$PNPM_HAVE" != "$PNPM_VERSION" ]]; then
+  msg_info "pnpm ${PNPM_VERSION} wird installiert (dsh-Plugin-Manager)"
+  npm install -g "pnpm@${PNPM_VERSION}" --no-audit --no-fund --loglevel=error
+  hash -r 2>/dev/null || true
+  PNPM_HAVE="$(pnpm --version 2>/dev/null || true)"
+  [[ -n "$PNPM_HAVE" ]] || msg_fatal "pnpm konnte nicht installiert werden (npm-Ausgabe oben prüfen)."
+  msg_ok "pnpm ${PNPM_HAVE} installiert ($(command -v pnpm))"
+else
+  msg_ok "pnpm ${PNPM_HAVE} bereits installiert"
+fi
+
+# npm kann global in ein Prefix installieren, das nicht im PATH liegt.
+NPM_GLOBAL_BIN="$(npm prefix -g 2>/dev/null || echo /usr)/bin"
+if ! command -v pnpm >/dev/null 2>&1 && [[ -x "${NPM_GLOBAL_BIN}/pnpm" ]]; then
+  ln -sfn "${NPM_GLOBAL_BIN}/pnpm" /usr/local/bin/pnpm
+  hash -r 2>/dev/null || true
+fi
+command -v pnpm >/dev/null 2>&1 \
+  || msg_fatal "pnpm ist nicht im PATH – Plugin-Manager würde mit ENOENT scheitern."
+
+# Der Service läuft als Benutzer 'dsh'; genau dieser Benutzer muss pnpm aufrufen
+# können (PATH, Leserechte, HOME für den pnpm-Store).
+if command -v runuser >/dev/null 2>&1; then
+  runuser -u "$DSH_USER" -- env HOME="$DSH_HOME" PATH="$PATH" pnpm --version >/dev/null 2>&1 \
+    || msg_fatal "Benutzer '${DSH_USER}' kann pnpm nicht ausführen – Rechte/PATH prüfen."
+fi
+msg_ok "pnpm ist für den Plugin-Manager bereit (auch als Benutzer '${DSH_USER}')"
 
 # ───────────────────────── 4. dsh installieren/aktualisieren ────────────────
 INSTALLED_DSH_VERSION="$(dsh --version 2>/dev/null || true)"
@@ -399,6 +443,9 @@ fi
 
 # ───────────────────────── 7. systemd-Unit ──────────────────────────────────
 msg_info "systemd-Unit wird geschrieben (/etc/systemd/system/${APP}.service)"
+# pnpm liegt je nach npm-Prefix in /usr/bin oder einem eigenen Verzeichnis.
+# Der PATH im Service stellt sicher, dass der Plugin-Manager pnpm findet.
+SERVICE_PATH="${NPM_GLOBAL_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 cat > "/etc/systemd/system/${APP}.service" << UNIT
 [Unit]
 Description=${APP_NAME} Web UI (dsh)
@@ -416,6 +463,7 @@ Environment=HOME=${DSH_HOME}
 Environment=DSH_HOME=${DSH_HOME}
 Environment=DSH_PORT=${DSH_PORT}
 Environment=PUBLIC_PORT=${PUBLIC_PORT}
+Environment=PATH=${SERVICE_PATH}
 ExecStart=/usr/local/bin/dsh-start.sh
 Restart=always
 RestartSec=5
@@ -579,6 +627,7 @@ echo -e " ${YW}Web UI:${CL}      ${ROOT_URL}"
 echo -e " ${YW}Jetzt öffnen:${CL} ${WEB_URL}"
 echo -e "                  (Einmal-Login; danach gilt das Cookie 30 Tage)"
 echo -e " ${YW}Neuer Login:${CL} im Container: ${BL}dsh-url${CL}"
+echo -e " ${YW}pnpm:${CL}        ${PNPM_HAVE} (Plugin-Manager bereit)"
 if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
   echo -e " ${YW}FileBrowser:${CL} http://${CT_IP}:${FILEBROWSER_PORT}"
   echo -e " ${YW}FB-IP:${CL}       ${CT_IP}"

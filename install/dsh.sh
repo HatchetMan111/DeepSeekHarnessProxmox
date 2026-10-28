@@ -40,6 +40,7 @@ DISK_GB="${DISK_GB:-16}"
 PUBLIC_PORT="${PUBLIC_PORT:-8080}"  # extern erreichbarer Port (nginx)
 DSH_PORT="${DSH_PORT:-3080}"        # interner dsh-Port (nur 127.0.0.1)
 DSH_VERSION="${DSH_VERSION:-0.2.1-rc.2}"  # getestet; "latest" für Auto-Update
+PNPM_VERSION="${PNPM_VERSION:-12.15.0}"   # pnpm für den dsh-Plugin-Manager
 
 # FileBrowser: Dateizugriff auf den dsh-Workspace (optional, standardmäßig an)
 INSTALL_FILEBROWSER="${INSTALL_FILEBROWSER:-1}"
@@ -70,15 +71,18 @@ msg_fatal() { echo -e " ${CROSS} ${1}" >&2; exit 1; }
 
 [[ "$DSH_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
   || msg_fatal "DSH_VERSION enthält unerwartete Zeichen (erlaubt: [A-Za-z0-9._-])."
+[[ "$PNPM_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || msg_fatal "PNPM_VERSION enthält unerwartete Zeichen (erlaubt: [A-Za-z0-9._-])."
 
 case "$INSTALL_FILEBROWSER" in
   0|1) ;;
   *) msg_fatal "INSTALL_FILEBROWSER muss 0 oder 1 sein." ;;
 esac
 if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
-  [[ "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
-    && (( FILEBROWSER_PORT >= 1 && FILEBROWSER_PORT <= 65535 )) \
-    || msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  if [[ ! "$FILEBROWSER_PORT" =~ ^[0-9]+$ ]] \
+    || (( FILEBROWSER_PORT < 1 || FILEBROWSER_PORT > 65535 )); then
+    msg_fatal "FILEBROWSER_PORT muss eine Portnummer (1-65535) sein."
+  fi
   [[ "$FILEBROWSER_USER" =~ ^[A-Za-z0-9._-]{1,32}$ ]] \
     || msg_fatal "FILEBROWSER_USER: erlaubt sind 1-32 Zeichen aus [A-Za-z0-9._-]."
   [[ "$FILEBROWSER_PASSWORD" =~ ^[A-Za-z0-9._!@#%^\&*+=-]{1,64}$ ]] \
@@ -250,6 +254,7 @@ set -o pipefail
 msg_info "Installiere ${APP_NAME} im Container (Log: ${HOST_LOG})"
 INNER_ENV=(
   "DSH_VERSION=${DSH_VERSION}"
+  "PNPM_VERSION=${PNPM_VERSION}"
   "INSTALL_FILEBROWSER=${INSTALL_FILEBROWSER}"
   "FILEBROWSER_PORT=${FILEBROWSER_PORT}"
   "FILEBROWSER_USER=${FILEBROWSER_USER}"

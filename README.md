@@ -8,6 +8,8 @@ Einzeiler im Stil der [Proxmox VE Community Scripts](https://community-scripts.g
 - Web UI unter `http://<CT-IP>:8080` – Login per Token-Link, danach 30 Tage Cookie
 - **FileBrowser** unter `http://<CT-IP>:8081` – direkter Dateizugriff auf `/opt/dsh`
   (Standard-Login `admin` / `admin`, abschaltbar mit `INSTALL_FILEBROWSER=0`)
+- **pnpm ist vorinstalliert** – der Plugin-Manager der Web UI (`pnpm view` / `pnpm add`)
+  funktioniert sofort, ohne manuelles Nachinstallieren
 - DeepSeek-API-Key kann **direkt bei der Installation** hinterlegt werden
 - Reboot-sicher durch systemd (`Restart=always`) + `onboot=1`
 - Idempotent: erneutes Ausführen = Update
@@ -45,6 +47,7 @@ CTID=150 CORES=4 MEM_MB=4096 DISK_GB=16 \
 | `PUBLIC_PORT`   | `8080`            | Externer Port der Web UI                         |
 | `DSH_PORT`      | `3080`            | Interner dsh-Port (nur localhost)                |
 | `DSH_VERSION`   | `0.2.1-rc.2`      | Getestete dsh-Version (`latest` = immer updaten) |
+| `PNPM_VERSION`  | `12.15.0`         | pnpm für den Plugin-Manager (`latest` = immer updaten) |
 | `INSTALL_FILEBROWSER` | `1`         | FileBrowser installieren (`0` = deaktivieren)    |
 | `FILEBROWSER_PORT` | `8081`         | Externer Port von FileBrowser                    |
 | `FILEBROWSER_USER` | `admin`        | FileBrowser-Admin-Benutzer                       |
@@ -78,8 +81,10 @@ zusätzlich nicht-fatal gegen `https://api.deepseek.com/models`.
 1. Legt einen **unprivilegierten Debian-12-LXC** an (Hostname standardmäßig `DeepSeekHarness`,
    `nesting=1` für die bwrap-Sandbox von dsh, `onboot=1`, DHCP an `vmbr0`) – existiert die
    CT-ID schon, wird stattdessen **aktualisiert**
-2. Installiert im CT: nginx, bubblewrap, **Node.js ≥ 20 (standardmäßig 22 LTS)** und das npm-Paket
-   `@deepseek-ai/dsh` in der getesteten Version
+2. Installiert im CT: nginx, bubblewrap, **Node.js ≥ 20 (standardmäßig 22 LTS)**,
+   **pnpm** (für den dsh-Plugin-Manager) und das npm-Paket `@deepseek-ai/dsh` in der
+   getesteten Version. pnpm wird auf die gepinnte Version gebracht; mit
+   `PNPM_VERSION=latest` wird es bei jedem Lauf aktualisiert.
 3. Startet `dsh web --no-open` als Service-Benutzer `dsh` **nur auf 127.0.0.1:3080**.
    nginx stellt die Web UI auf `0.0.0.0:8080` bereit und reicht **Host, Origin, Cookies
    und WebSockets unverändert** durch – die Authentifizierung bleibt vollständig bei dsh
@@ -92,8 +97,9 @@ zusätzlich nicht-fatal gegen `https://api.deepseek.com/models`.
    - `randomUUID`-Polyfill für HTTP-Zugriff ohne HTTPS
    - fremder `Origin` → `403`, unauthentifizierte API → `401`
    - FileBrowser erreichbar (`200`) und Login `admin/admin` (`200`)
+   - `pnpm --version` auch als Benutzer `dsh` (Plugin-Manager)
    - optional: API-Key via `credentials/describe` als `configured: true`
-7. Gibt am Ende den **Token-Link** und die **FileBrowser-Zugangsdaten** aus
+7. Gibt am Ende den **Token-Link**, die **pnpm-Version** und die **FileBrowser-Zugangsdaten** aus
 
 Root-Passwort des neuen Containers liegt nach dem ersten Lauf in `/root/dsh-ct<CTID>.credentials`.
 Der LXC-Login ist `root` mit diesem Passwort – oder ohne Passwort per `pct enter <CTID>`.
@@ -145,6 +151,30 @@ Den Port `8081` ggf. zusätzlich in UFW/Proxmox-Firewall schließen.
 > Internet weiterleiten. Bei einem Update bleibt ein bereits gesetztes FileBrowser-Passwort
 > erhalten (die Datenbank wird nicht überschrieben).
 
+### Plugins
+
+Plugins werden im Profil des Containers mit **pnpm** installiert. Der Installer
+richtet pnpm global ein und stellt sicher, dass der Service-Benutzer `dsh` es
+ausführen kann – die Plugin-Suche bzw. -Installation in der Web UI funktioniert
+damit ohne manuellen Eingriff.
+
+Prüfen (im Container oder per `pct exec <CTID> -- …`):
+
+```bash
+pnpm --version
+runuser -u dsh -- env HOME=/var/lib/dsh pnpm --version
+```
+
+Immer die aktuelle pnpm-Version installieren (statt der gepinnten `12.15.0`):
+
+```bash
+PNPM_VERSION=latest \
+  bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DeepSeekHarnessProxmox/main/install/dsh.sh)"
+```
+
+Bei einem **bestehenden** Container genügt ein erneuter Lauf des Installers
+(Update-Modus) – pnpm wird dabei nachinstalliert, falls es fehlt.
+
 ### Login / Token erneut holen
 
 `dsh` erzeugt bei **jedem Start** einen neuen Launch-Token. Ein neuer Browser (oder ein
@@ -172,6 +202,7 @@ pct exec <CTID> -- bash -c \
 Nach einem Update/Neustart bleibt ein bestehendes Browser-Cookie gültig. Ein **neuer**
 Browser braucht wieder `dsh-url`. Ressourcen eines bestehenden Containers werden nicht
 automatisch vergrößert – dafür `pct set <CTID> --memory ... --rootfs ...` nutzen.
+Der Installer stellt im Update-Modus auch **pnpm** wieder sicher, falls es im CT fehlt.
 
 ### IP-Adresse geändert?
 
@@ -197,12 +228,13 @@ sleep 30
 pct exec <CTID> -- systemctl is-active dsh nginx filebrowser  # → active / active / active
 pct exec <CTID> -- curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8080/  # → 401 (ohne Cookie)
 pct exec <CTID> -- curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8081/  # → 200 (FileBrowser)
+pct exec <CTID> -- runuser -u dsh -- env HOME=/var/lib/dsh pnpm --version  # → z. B. 12.15.0
 pct exec <CTID> -- /usr/local/bin/dsh-url           # → Token-Link für den Browser
 ```
 
 Erwartung nach Neustart: alle Services `active`, Web UI antwortet (401 ohne Login),
-FileBrowser antwortet (200), Token-Link über `dsh-url` abrufbar. Ein bereits eingeloggter
-Browser funktioniert direkt weiter.
+FileBrowser antwortet (200), `pnpm` ist als Benutzer `dsh` ausführbar, Token-Link über
+`dsh-url` abrufbar. Ein bereits eingeloggter Browser funktioniert direkt weiter.
 
 ---
 
@@ -215,6 +247,7 @@ Browser funktioniert direkt weiter.
 | `401 Unauthorized` in der Web UI | Normale URL ohne Login geöffnet. Token-Link nutzen: `pct exec <CTID> -- /usr/local/bin/dsh-url`. Danach ist 30 Tage Cookie-Login. |
 | Neuer Browser / Cookie abgelaufen | `pct exec <CTID> -- /usr/local/bin/dsh-url` – der Token ändert sich bei jedem dsh-Start. |
 | Installer bricht ab | Komplette Fehlerkette wird ausgegeben (Exit-Code, Zeile, Befehl, Log-Tail); Host-Log: `/tmp/dsh-install-*.log` |
+| Plugin-Suche/-Installation scheitert: `spawn pnpm ENOENT` bzw. `pnpm was not found` | pnpm fehlt im Container. Der Installer installiert es standardmäßig; bestehenden CT einmal mit dem Einzeiler aktualisieren. Manuell: `pct exec <CTID> -- npm install -g pnpm@latest`, dann `pct exec <CTID> -- runuser -u dsh -- env HOME=/var/lib/dsh pnpm --version` prüfen. |
 | `crypto.randomUUID is not a function` (z. B. „Could not load agent presets") | nginx injiziert ein Polyfill in die Web-UI-HTML (die API existiert im Browser nur unter HTTPS/localhost). Prüfen: `curl -s http://localhost:8080 \| grep -c randomUUID` → muss ≥ 1 sein; danach Browser-Cache leeren (Strg+Umschalt+F5) |
 | `HTTP 403` bei API-Calls | dsh blockiert fremde `Host`/`Origin`-Kombinationen. Zugriff über die CT-IP oder den Hostnamen; nach IP-Wechsel `systemctl restart dsh`. Prüfen: `journalctl -u dsh -e` |
 | `settings are unavailable` / Models-Auswahl lädt nicht | Meist ein 401 (Token/Cookie) oder 403 (Origin). Erst `dsh-url` im selben Browser öffnen, dann Settings erneut laden. |
