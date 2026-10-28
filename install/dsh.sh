@@ -227,7 +227,7 @@ msg_ok "Netzwerk bereit"
 
 # ───────────── 5. Bootstrap (wget/ca-certs) + Inner-Script laden ────────────
 msg_info "Bootstrap-Pakete im Container"
-pct exec "$CTID" -- bash -c \
+pct exec "$CTID" -- env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -c \
   "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq ca-certificates wget >/dev/null"
 
 msg_info "Lade Installations-Script: ${INNER_URL}"
@@ -255,6 +255,9 @@ msg_info "Installiere ${APP_NAME} im Container (Log: ${HOST_LOG})"
 INNER_ENV=(
   "DSH_VERSION=${DSH_VERSION}"
   "PNPM_VERSION=${PNPM_VERSION}"
+  "LANG=C.UTF-8"
+  "LC_ALL=C.UTF-8"
+  "NPM_CONFIG_UPDATE_NOTIFIER=false"
   "INSTALL_FILEBROWSER=${INSTALL_FILEBROWSER}"
   "FILEBROWSER_PORT=${FILEBROWSER_PORT}"
   "FILEBROWSER_USER=${FILEBROWSER_USER}"

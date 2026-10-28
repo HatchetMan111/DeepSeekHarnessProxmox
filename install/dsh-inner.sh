@@ -47,6 +47,7 @@ IDX_HTML=""
 FB_TMP=""
 FB_PID=""
 FB_SETUP_LOG=""
+NS_LOG=""
 FB_NEW_DB=0
 cleanup() {
   [[ -n "$API_KEY_FILE" ]] && rm -f "$API_KEY_FILE"
@@ -54,6 +55,7 @@ cleanup() {
   [[ -n "$IDX_HTML" ]] && rm -f "$IDX_HTML"
   [[ -n "$FB_TMP" ]] && rm -rf "$FB_TMP"
   [[ -n "$FB_SETUP_LOG" ]] && rm -f "$FB_SETUP_LOG"
+  [[ -n "$NS_LOG" ]] && rm -f "$NS_LOG"
   [[ -n "$FB_PID" ]] && kill "$FB_PID" 2>/dev/null
   return 0
 }
@@ -117,6 +119,13 @@ on_error() {
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
+# Debian-Container haben oft LANG=en_US.UTF-8, aber die Locale ist nicht
+# generiert – apt/perl würden bei jedem Aufruf warnen. C.UTF-8 ist überall
+# vorhanden und hält die Installationsausgabe sauber.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+# Kein "New major version of npm available"-Hinweis in der Installationsausgabe.
+export NPM_CONFIG_UPDATE_NOTIFIER=false
 
 echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo -e "${GN} ${APP_NAME} – Installation im Container${CL}"
@@ -140,7 +149,18 @@ fi
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/' || echo 0)"
 if [[ "${NODE_MAJOR:-0}" -lt "$NODE_MAJOR_REQUIRED" ]]; then
   msg_info "Node.js ${NODE_MAJOR_REQUIRED}+ nicht gefunden (vorhanden: v${NODE_MAJOR:-0}) → NodeSource-Setup"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+  # NodeSource nutzt intern 'apt' und erzeugt damit harmlose, aber laute
+  # "apt does not have a stable CLI interface"-Warnungen. Ausgabe nur bei
+  # einem echten Fehler zeigen.
+  NS_LOG="$(mktemp)"
+  if ! curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >"$NS_LOG" 2>&1; then
+    cat "$NS_LOG" >&2 || true
+    rm -f "$NS_LOG"
+    NS_LOG=""
+    msg_fatal "NodeSource-Setup fehlgeschlagen (Details oben)."
+  fi
+  rm -f "$NS_LOG"
+  NS_LOG=""
   apt-get install -y -qq nodejs >/dev/null
 fi
 msg_ok "Node.js $(node -v), npm v$(npm -v)"
@@ -382,7 +402,8 @@ if [[ "$INSTALL_FILEBROWSER" == "1" ]]; then
   install -m 755 "${FB_TMP}/filebrowser" /usr/local/bin/filebrowser
   rm -rf "$FB_TMP"
   FB_TMP=""
-  msg_ok "FileBrowser $(/usr/local/bin/filebrowser version 2>/dev/null | head -n1)"
+  FB_VERSION="$(/usr/local/bin/filebrowser version 2>/dev/null | head -n1 | sed 's/^File Browser //')"
+  msg_ok "FileBrowser ${FB_VERSION}"
 
   if [[ ! -d "$FILEBROWSER_ROOT" ]]; then
     mkdir -p "$FILEBROWSER_ROOT"
